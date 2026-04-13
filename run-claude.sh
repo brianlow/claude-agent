@@ -15,7 +15,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VAULT="${SCRIPT_DIR}"
+VAULT="${HOME}/Library/Mobile Documents/iCloud~md~obsidian/Documents/Brian's Vault"
 IMAGE="claude-code:latest"
 
 # Pick the lowest-numbered slot (1-3) not currently in use
@@ -73,7 +73,7 @@ echo "  Config: ~/.claude → /home/user/.claude"
 echo "  Bear:   ${BEAR_DIR} → /bear (ro)"
 echo ""
 
-exec container run \
+exec caffeinate -i container run \
   --name "${CONTAINER_NAME}" \
   --interactive \
   --tty \

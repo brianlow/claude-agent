@@ -16,7 +16,7 @@ RUN npm install -g @anthropic-ai/claude-code
 # Create a non-root user (--dangerously-skip-permissions is blocked for root)
 # Give passwordless sudo so they can install packages freely
 # curl + jq are used by umami-export.sh; python3/pip + gcalcli for calendar access
-RUN apt-get update && apt-get install -y sudo curl jq python3 python3-pip && rm -rf /var/lib/apt/lists/* \
+RUN apt-get update && apt-get install -y sudo curl jq sqlite3 python3 python3-pip && rm -rf /var/lib/apt/lists/* \
  && useradd -m -s /bin/bash user \
  && echo "user ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/user \
  && pip3 install --break-system-packages gcalcli
