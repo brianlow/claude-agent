@@ -11,7 +11,7 @@ RUN npx playwright install --with-deps chromium && chmod -R 755 /ms-playwright \
  && ln -sf "$(find /ms-playwright -name chrome -type f -path '*/chrome-linux/chrome')" /opt/google/chrome/chrome
 
 # Install Claude Code — updated more frequently, keep near the end
-RUN npm install -g @anthropic-ai/claude-code
+RUN npm install -g @anthropic-ai/claude-code @cometix/ccline
 
 # Create a non-root user (--dangerously-skip-permissions is blocked for root)
 # Give passwordless sudo so they can install packages freely

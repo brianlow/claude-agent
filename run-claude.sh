@@ -6,8 +6,9 @@
 #   - Apple Container installed (github.com/apple/container/releases)
 #
 # Usage:
-#   ./run-claude.sh           # launch claude
-#   ./run-claude.sh --build   # rebuild image then launch
+#   ./run-claude.sh             # launch claude
+#   ./run-claude.sh --build     # rebuild image then launch
+#   ./run-claude.sh --build-only  # rebuild image only, don't launch
 #
 # Auth: On first run, claude will open a browser to log in via claude.ai.
 #       Credentials are stored in ~/.claude (mounted from host) so you only do this once.
@@ -36,6 +37,8 @@ BUILD=false
 BUILD_ONLY=false
 for arg in "$@"; do
   if [[ "${arg}" == "--build" ]]; then
+    BUILD=true
+  elif [[ "${arg}" == "--build-only" ]]; then
     BUILD=true
     BUILD_ONLY=true
   fi
@@ -78,6 +81,7 @@ exec caffeinate -i container run \
   --interactive \
   --tty \
   --rm \
+  --env COLORTERM=truecolor \
   --mount "source=${VAULT},target=/vault" \
   --mount "source=${HOME}/.claude,target=/home/user/.claude" \
   --mount "source=${HOME}/.gcalcli,target=/home/user/.local/share/gcalcli" \
