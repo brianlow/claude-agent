@@ -15,6 +15,8 @@ if [ -f /home/user/.claude.json ]; then
   fi
 fi
 
+export AGENT_BROWSER_EXECUTABLE_PATH=$(python3 -c "from cloakbrowser import ensure_binary; print(ensure_binary())" 2>/dev/null)
+
 # Register Playwright MCP server (user scope — persists via ~/.claude.json host mount)
 if ! claude mcp list 2>/dev/null | grep -q playwright; then
   claude mcp add --scope user playwright -- \
@@ -22,4 +24,11 @@ if ! claude mcp list 2>/dev/null | grep -q playwright; then
     --browser chromium --headless
 fi
 
-exec claude --dangerously-skip-permissions --permission-mode bypassPermissions --remote-control --remote-control-session-name-prefix agent
+# Use an explicit remote-control session name (e.g. agent-1) instead of an
+# auto-generated "<prefix>-<random>" one. AGENT_SESSION_NAME is passed in from
+# run-claude.sh and matches the container slot; falls back to a prefix otherwise.
+if [ -n "${AGENT_SESSION_NAME:-}" ]; then
+  exec claude --dangerously-skip-permissions --permission-mode bypassPermissions --remote-control "${AGENT_SESSION_NAME}"
+else
+  exec claude --dangerously-skip-permissions --permission-mode bypassPermissions --remote-control --remote-control-session-name-prefix agent
+fi

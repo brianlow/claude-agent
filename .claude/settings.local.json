@@ -3,5 +3,9 @@
     "allow": [
       "WebSearch"
     ]
+  },
+  "sandbox": {
+    "enabled": false,
+    "autoAllowBashIfSandboxed": false
   }
 }

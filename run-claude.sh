@@ -19,18 +19,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VAULT="${HOME}/Library/Mobile Documents/iCloud~md~obsidian/Documents/Brian's Vault"
 IMAGE="claude-code:latest"
 
-# Pick the lowest-numbered slot (1-3) not currently in use
-CONTAINER_NAME=""
-for i in 1 2 3; do
-  if ! container list --all 2>/dev/null | grep -q "^claude-vault-${i}"; then
-    CONTAINER_NAME="claude-vault-${i}"
-    break
-  fi
-done
-if [[ -z "${CONTAINER_NAME}" ]]; then
-  echo "Error: all 3 container slots are in use (claude-vault-1, -2, -3)"
-  exit 1
-fi
+# Pick the lowest-numbered slot (1-3) not currently in use.
+# Called per-session so a restart grabs a fresh slot (a crashed --rm
+# container has already freed its own slot).
+pick_container_name() {
+  for i in 1 2 3; do
+    if ! container list --all 2>/dev/null | grep -q "^agent-${i}"; then
+      echo "agent-${i}"
+      return 0
+    fi
+  done
+  return 1
+}
 
 # Parse flags
 BUILD=false
@@ -70,21 +70,50 @@ fi
 
 BEAR_DIR="${HOME}/Library/Group Containers/9K33E3U3T4.net.shinyfrog.bear/Application Data"
 
-echo "Starting container '${CONTAINER_NAME}'..."
-echo "  Vault:  ${VAULT} → /vault"
-echo "  Config: ~/.claude → /home/user/.claude"
-echo "  Bear:   ${BEAR_DIR} → /bear (ro)"
-echo ""
+# Run sessions in a loop: if claude/the container crashes (non-zero exit),
+# spin up a fresh session. A clean exit (code 0, e.g. you quit claude) stops.
+# Give up after MAX_RESTARTS crashes to avoid an endless crash-loop.
+MAX_RESTARTS=7
+restarts=0
+while true; do
+  CONTAINER_NAME="$(pick_container_name)" || {
+    echo "Error: all 3 container slots are in use (agent-1, -2, -3)"
+    exit 1
+  }
 
-exec caffeinate -i container run \
-  --name "${CONTAINER_NAME}" \
-  --interactive \
-  --tty \
-  --rm \
-  --env COLORTERM=truecolor \
-  --mount "source=${VAULT},target=/vault" \
-  --mount "source=${HOME}/.claude,target=/home/user/.claude" \
-  --mount "source=${HOME}/.gcalcli,target=/home/user/.local/share/gcalcli" \
-  --mount "source=${BEAR_DIR},target=/bear,readonly" \
-  --workdir /vault \
-  "${IMAGE}"
+  echo "Starting container '${CONTAINER_NAME}'..."
+  echo "  Vault:  ${VAULT} → /vault"
+  echo "  Config: ~/.claude → /home/user/.claude"
+  echo "  Bear:   ${BEAR_DIR} → /bear (ro)"
+  echo ""
+
+  status=0
+  caffeinate -i container run \
+    --name "${CONTAINER_NAME}" \
+    --interactive \
+    --tty \
+    --rm \
+    --env COLORTERM=truecolor \
+    --env AGENT_SESSION_NAME="${CONTAINER_NAME}" \
+    --mount "source=${VAULT},target=/vault" \
+    --mount "source=${HOME}/.claude,target=/home/user/.claude" \
+    --mount "source=${HOME}/.gcalcli,target=/home/user/.local/share/gcalcli" \
+    --mount "source=${BEAR_DIR},target=/bear,readonly" \
+    --workdir /vault \
+    "${IMAGE}" || status=$?
+
+  if [[ ${status} -eq 0 ]]; then
+    break
+  fi
+
+  restarts=$((restarts + 1))
+  if [[ ${restarts} -ge ${MAX_RESTARTS} ]]; then
+    echo ""
+    echo "⛔  Session '${CONTAINER_NAME}' exited (code ${status}). Hit restart cap (${MAX_RESTARTS}) — giving up."
+    exit "${status}"
+  fi
+
+  echo ""
+  echo "⚠️  Session '${CONTAINER_NAME}' exited (code ${status}). Restart ${restarts}/${MAX_RESTARTS} in 3s — press Ctrl-C to stop."
+  sleep 3
+done
