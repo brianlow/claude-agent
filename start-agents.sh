@@ -25,7 +25,10 @@ for n in "${AGENTS[@]}"; do
     echo "agent-${n}: already loaded — leaving running."
   else
     echo "agent-${n}: bootstrapping..."
-    launchctl bootstrap "${GUI_DOMAIN}" "$(plist_for "$n")"
+    # Don't let one failed bootstrap abort the loop (set -e) — keep bringing up
+    # the rest and still print the status table at the end.
+    launchctl bootstrap "${GUI_DOMAIN}" "$(plist_for "$n")" \
+      || echo "agent-${n}: WARNING — bootstrap failed (see logs)."
   fi
 done
 
