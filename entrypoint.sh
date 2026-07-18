@@ -24,6 +24,20 @@ if ! claude mcp list 2>/dev/null | grep -q playwright; then
     --browser chromium --headless
 fi
 
+# Keepalive: prevent idle/no-client timeout by sending a no-op signal to the
+# claude process every 4 minutes. This keeps the remote-control session alive
+# even when nobody is connected or no conversation has started.
+keepalive() {
+  while true; do
+    sleep 240
+    # SIGWINCH is harmless (terminal resize) and wakes sleeping processes.
+    pkill -SIGWINCH -x claude 2>/dev/null || true
+  done
+}
+keepalive &
+KEEPALIVE_PID=$!
+trap 'kill ${KEEPALIVE_PID} 2>/dev/null || true' EXIT
+
 # Use an explicit remote-control session name (e.g. agent-1) instead of an
 # auto-generated "<prefix>-<random>" one. AGENT_SESSION_NAME is passed in from
 # run-claude.sh and matches the container slot; falls back to a prefix otherwise.

@@ -19,11 +19,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VAULT="${HOME}/Library/Mobile Documents/iCloud~md~obsidian/Documents/Brian's Vault"
 IMAGE="claude-code:latest"
 
-# Pick the lowest-numbered slot (1-3) not currently in use.
+# Pick the lowest-numbered slot (1-5) not currently in use.
 # Called per-session so a restart grabs a fresh slot (a crashed --rm
 # container has already freed its own slot).
 pick_container_name() {
-  for i in 1 2 3; do
+  for i in 1 2 3 4 5; do
     if ! container list --all 2>/dev/null | grep -q "^agent-${i}"; then
       echo "agent-${i}"
       return 0
@@ -70,25 +70,35 @@ fi
 
 BEAR_DIR="${HOME}/Library/Group Containers/9K33E3U3T4.net.shinyfrog.bear/Application Data"
 
-# Run sessions in a loop: if claude/the container crashes (non-zero exit),
-# spin up a fresh session. A clean exit (code 0, e.g. you quit claude) stops.
-# Give up after MAX_RESTARTS crashes to avoid an endless crash-loop.
+# Run sessions in a loop, restarting on any exit (including clean exit 0 which
+# happens on idle timeout / remote disconnect). Ctrl-C is the only way to stop.
+# Give up after MAX_RESTARTS rapid crashes (< MIN_RUNTIME_SECS) to avoid a
+# crash-loop on bad config.
 MAX_RESTARTS=7
-restarts=0
+MIN_RUNTIME_SECS=30
+rapid_crashes=0
+
+# Ctrl-C sets this flag; the loop checks it after each container exits.
+STOP=false
+trap 'STOP=true' INT TERM
+
 while true; do
   CONTAINER_NAME="$(pick_container_name)" || {
-    echo "Error: all 3 container slots are in use (agent-1, -2, -3)"
+    echo "Error: all 5 container slots are in use (agent-1..agent-5)"
     exit 1
   }
 
-  echo "Starting container '${CONTAINER_NAME}'..."
+  echo "[$(date '+%H:%M:%S')] Starting container '${CONTAINER_NAME}'..."
   echo "  Vault:  ${VAULT} → /vault"
   echo "  Config: ~/.claude → /home/user/.claude"
   echo "  Bear:   ${BEAR_DIR} → /bear (ro)"
   echo ""
 
+  start_ts=$(date +%s)
   status=0
-  caffeinate -i container run \
+  # caffeinate -dims: prevent display sleep (-d), idle sleep (-i),
+  # system sleep (-m), and disk sleep (-s) for the duration of the container.
+  caffeinate -dims container run \
     --name "${CONTAINER_NAME}" \
     --interactive \
     --tty \
@@ -102,18 +112,34 @@ while true; do
     --workdir /vault \
     "${IMAGE}" || status=$?
 
-  if [[ ${status} -eq 0 ]]; then
-    break
-  fi
-
-  restarts=$((restarts + 1))
-  if [[ ${restarts} -ge ${MAX_RESTARTS} ]]; then
-    echo ""
-    echo "⛔  Session '${CONTAINER_NAME}' exited (code ${status}). Hit restart cap (${MAX_RESTARTS}) — giving up."
-    exit "${status}"
-  fi
-
+  runtime=$(( $(date +%s) - start_ts ))
   echo ""
-  echo "⚠️  Session '${CONTAINER_NAME}' exited (code ${status}). Restart ${restarts}/${MAX_RESTARTS} in 3s — press Ctrl-C to stop."
-  sleep 3
+  echo "[$(date '+%H:%M:%S')] Session '${CONTAINER_NAME}' exited (code ${status}, ran ${runtime}s)."
+
+  # Stop if the user pressed Ctrl-C.
+  if ${STOP}; then
+    echo "Stopped by user."
+    exit 0
+  fi
+
+  # Count rapid crashes (container lived less than MIN_RUNTIME_SECS).
+  if [[ ${runtime} -lt ${MIN_RUNTIME_SECS} ]]; then
+    rapid_crashes=$((rapid_crashes + 1))
+    if [[ ${rapid_crashes} -ge ${MAX_RESTARTS} ]]; then
+      echo "⛔  Hit rapid-crash cap (${MAX_RESTARTS} exits in < ${MIN_RUNTIME_SECS}s) — giving up."
+      exit "${status}"
+    fi
+    echo "⚠️  Rapid exit ${rapid_crashes}/${MAX_RESTARTS}. Restarting in 3s — press Ctrl-C to stop."
+    sleep 3
+  else
+    # Healthy session ended (idle timeout / disconnect). Reset crash counter and
+    # restart immediately.
+    rapid_crashes=0
+    if [[ ${status} -eq 0 ]]; then
+      echo "↺  Session ended cleanly (likely idle timeout). Reconnecting in 2s..."
+    else
+      echo "↺  Session crashed. Reconnecting in 2s..."
+    fi
+    sleep 2
+  fi
 done
