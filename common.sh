@@ -13,13 +13,22 @@ GUI_DOMAIN="gui/$(id -u)"
 VAULT="${HOME}/Library/Mobile Documents/iCloud~md~obsidian/Documents/Brian's Vault"
 BEAR_DIR="${HOME}/Library/Group Containers/9K33E3U3T4.net.shinyfrog.bear/Application Data"
 
+# Remote-reset feature: a launchd poller watches SENTINEL's mtime and, when it
+# changes, recycles the whole fleet. SENTINEL is a note inside the iCloud vault,
+# so editing it from Obsidian mobile (→ iCloud → this Mac) is the remote trigger.
+WATCHER_LABEL="${LABEL_PREFIX}.reset-watcher"
+SENTINEL="${VAULT}/Fleet Reset.md"
+RESET_STATE="${HOME}/.claude-agent/reset-last-seen"
+
 # launchd jobs inherit a minimal PATH; make binaries resolvable everywhere.
 export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
 label_for() { printf '%s.%s' "${LABEL_PREFIX}" "$1"; }
 plist_for() { printf '%s/%s.plist' "${PLIST_DIR}" "$(label_for "$1")"; }
+watcher_plist() { printf '%s/%s.plist' "${PLIST_DIR}" "${WATCHER_LABEL}"; }
 
-is_loaded() { launchctl print "${GUI_DOMAIN}/$(label_for "$1")" &>/dev/null; }
+is_loaded_label() { launchctl print "${GUI_DOMAIN}/$1" &>/dev/null; }
+is_loaded() { is_loaded_label "$(label_for "$1")"; }
 
 container_state() {
   local state
@@ -54,6 +63,28 @@ render_plist() {
 PLIST
 }
 
+render_watcher_plist() {
+  local log="${LOG_DIR}/reset-watcher.log"
+  cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>${WATCHER_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${REPO_DIR}/reset-watcher.sh</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>StartInterval</key><integer>15</integer>
+    <key>WorkingDirectory</key><string>${REPO_DIR}</string>
+    <key>StandardOutPath</key><string>${log}</string>
+    <key>StandardErrorPath</key><string>${log}</string>
+</dict>
+</plist>
+PLIST
+}
+
 print_status() {
   printf '%-9s %-12s %s\n' "AGENT" "LAUNCHD" "CONTAINER"
   local n l
@@ -61,4 +92,6 @@ print_status() {
     if is_loaded "$n"; then l="loaded"; else l="not loaded"; fi
     printf '%-9s %-12s %s\n' "agent-${n}" "$l" "$(container_state "$n")"
   done
+  if is_loaded_label "${WATCHER_LABEL}"; then l="loaded"; else l="not loaded"; fi
+  printf '%-9s %-12s %s\n' "watcher" "$l" "-"
 }

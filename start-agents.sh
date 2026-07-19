@@ -32,5 +32,15 @@ for n in "${AGENTS[@]}"; do
   fi
 done
 
+# Bring up the remote-reset watcher (idempotent, same as the agents).
+render_watcher_plist > "$(watcher_plist)"
+if is_loaded_label "${WATCHER_LABEL}"; then
+  echo "reset-watcher: already loaded."
+else
+  echo "reset-watcher: bootstrapping..."
+  launchctl bootstrap "${GUI_DOMAIN}" "$(watcher_plist)" \
+    || echo "reset-watcher: WARNING — bootstrap failed (see logs)."
+fi
+
 echo
 print_status

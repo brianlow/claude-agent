@@ -15,7 +15,7 @@ container system status &>/dev/null || container system start
 # Clean slot: drop any stale/stopped/running container with this name.
 container rm -f "${NAME}" &>/dev/null || true
 
-# Host-side prep (mirrors the original run-claude.sh).
+# Host-side prep: sync gcalcli oauth and stash ~/.claude.json into the mount.
 mkdir -p "${HOME}/.gcalcli"
 cp "${HOME}/Library/Application Support/gcalcli/oauth" "${HOME}/.gcalcli/oauth" 2>/dev/null || true
 [ -f "${HOME}/.claude.json" ] && cp "${HOME}/.claude.json" "${HOME}/.claude/.claude.json"

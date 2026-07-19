@@ -40,7 +40,7 @@ trap 'kill ${KEEPALIVE_PID} 2>/dev/null || true' EXIT
 
 # Use an explicit remote-control session name (e.g. agent-1) instead of an
 # auto-generated "<prefix>-<random>" one. AGENT_SESSION_NAME is passed in from
-# run-claude.sh and matches the container slot; falls back to a prefix otherwise.
+# agent-run.sh and matches the container name; falls back to a prefix otherwise.
 if [ -n "${AGENT_SESSION_NAME:-}" ]; then
   exec claude --dangerously-skip-permissions --permission-mode bypassPermissions --remote-control "${AGENT_SESSION_NAME}"
 else
