@@ -85,6 +85,22 @@ render_watcher_plist() {
 PLIST
 }
 
+# launchctl bootstrap only queues the job; agent-run.sh then has to tear down the
+# stale container and start a new one. Poll until every agent is running so the
+# status table reflects the settled state, not a snapshot taken mid-launch.
+wait_for_agents() {
+  local deadline=$((SECONDS + ${1:-45})) n all_up
+  while ((SECONDS < deadline)); do
+    all_up=true
+    for n in "${AGENTS[@]}"; do
+      [[ "$(container_state "$n")" == "running" ]] || { all_up=false; break; }
+    done
+    $all_up && return 0
+    sleep 2
+  done
+  return 1
+}
+
 print_status() {
   printf '%-9s %-12s %s\n' "AGENT" "LAUNCHD" "CONTAINER"
   local n l

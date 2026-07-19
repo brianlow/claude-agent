@@ -43,4 +43,7 @@ else
 fi
 
 echo
+echo "Waiting for agents to come up..."
+wait_for_agents 45 || echo "NOTE: not all agents reached 'running' within 45s — see ${LOG_DIR}/agent-N.log"
+echo
 print_status
