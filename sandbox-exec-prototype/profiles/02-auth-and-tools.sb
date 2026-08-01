@@ -1,0 +1,170 @@
+;; Phase 1, revision 02 — fix the denials revision 01 surfaced.
+;;
+;; Still scratch-only for the working dir. Vault / Bear / gcalcli are added in
+;; revision 03, deliberately, so denial noise stays attributable.
+;;
+;; Every addition below is annotated with the denial that motivated it.
+
+(version 1)
+(deny default)
+
+(import "bsd.sb")
+
+(allow process-fork)
+(allow signal (target self))
+(allow sysctl-read)
+
+;; --- executables -----------------------------------------------------------
+;; Scoped to system roots + the specific toolchains Claude shells out to.
+;; Deliberately NOT a blanket allow: exec staying scoped means the agent can't
+;; escape by writing a binary into its working directory and running it.
+(allow process-exec*
+  (subpath "/bin")
+  (subpath "/sbin")
+  (subpath "/usr/bin")
+  (subpath "/usr/sbin")
+  (subpath "/usr/libexec")
+  (subpath "/System")
+  (subpath "/Users/brianlow/.local/share/claude")
+  ;; denial: process-exec* /opt/homebrew/Cellar/git/2.47.0/bin/git
+  (subpath "/opt/homebrew")
+  ;; denial: process-exec* ~/.asdf/shims/{node,npx}
+  (subpath "/Users/brianlow/.asdf"))
+
+;; Blocked setuid exec. Denying this is correct and nothing needs it; listed
+;; explicitly with no-log so it stops cluttering the denial stream.
+(deny process-exec* (with no-log) (literal "/usr/bin/sudo"))
+
+;; --- read-only system ------------------------------------------------------
+(allow file-read*
+  (subpath "/System")
+  (subpath "/usr/lib")
+  (subpath "/usr/share")
+  (subpath "/usr/libexec")
+  (subpath "/bin")
+  (subpath "/sbin")
+  (subpath "/usr/bin")
+  (subpath "/usr/sbin")
+  (subpath "/opt/homebrew")
+  (subpath "/Users/brianlow/.asdf")
+  (subpath "/Library/Preferences/Logging")
+  ;; denial: file-read-data /Library/Preferences/com.apple.networkd.plist
+  (literal "/Library/Preferences/com.apple.networkd.plist")
+  (literal "/dev/null")
+  (literal "/dev/zero")
+  (literal "/dev/random")
+  (literal "/dev/urandom")
+  (literal "/dev/dtracehelper")
+  (literal "/private/etc/hosts")
+  (literal "/private/etc/localtime")
+  (literal "/private/etc/ssl/cert.pem")
+  (literal "/private/etc/protocols")
+  (literal "/private/etc/services")
+  (literal "/private/etc/passwd"))
+
+(allow file-read-metadata)
+
+;; denial: file-ioctl path:/dev/null
+(allow file-ioctl (literal "/dev/null"))
+
+;; --- keychain / auth -------------------------------------------------------
+;; This is what broke revision 01. Credentials for the installer build live in
+;; the login keychain (there's also a stale ~/.claude/.credentials.json, but
+;; the keychain is what's actually consulted), so reaching securityd is
+;; mandatory, not optional.
+;; denials: mach-lookup com.apple.SecurityServer, com.apple.securityd.xpc
+;;          user-preference-read com.apple.security, kcfpreferencesanyapplication
+(allow file-read* file-write*
+  (subpath "/Users/brianlow/Library/Keychains"))
+(allow file-read*
+  (subpath "/Library/Keychains")
+  (subpath "/System/Library/Keychains"))
+(allow user-preference-read
+  (preference-domain "com.apple.security")
+  (preference-domain "kcfpreferencesanyapplication"))
+
+;; --- tty -------------------------------------------------------------------
+(allow file-read* file-write* file-ioctl
+  (literal "/dev/tty")
+  (regex #"^/dev/ttys[0-9]*$")
+  (regex #"^/dev/ptmx$")
+  (literal "/dev/stdout")
+  (literal "/dev/stderr"))
+(allow pseudo-tty)
+
+;; --- Claude Code's own state ----------------------------------------------
+(allow file-read* (subpath "/Users/brianlow/.local/share/claude"))
+(allow file-read* file-write*
+  (subpath "/Users/brianlow/.claude")
+  (subpath "/Users/brianlow/.cache/claude")
+  (subpath "/Users/brianlow/Library/Caches/claude-cli-nodejs")
+  ;; denial: file-write-create ~/.local/state/claude/locks/2.1.220.lock.tmp.*
+  (subpath "/Users/brianlow/.local/state/claude"))
+
+;; ~/.claude.json is rewritten via randomly-named temp files alongside it, so
+;; a literal isn't enough. Regex-scoped to that one filename prefix rather
+;; than opening up the home directory.
+;; denial: file-write-create ~/.claude.json.tmp.17927.a35608e24b02
+(allow file-read* file-write*
+  (regex #"^/Users/brianlow/\.claude\.json(\.|$)"))
+
+;; Reading the home dir *entry* itself (not its contents) — several tools stat
+;; and list $HOME during startup. `literal` here is load-bearing: `subpath`
+;; would hand over the entire home directory and defeat the whole profile.
+;; denial: file-read-data /Users/brianlow
+(allow file-read* (literal "/Users/brianlow"))
+(allow file-read* (literal "/Users/brianlow/.local/bin"))
+
+;; git config — read-only.
+;; denials: file-read-data ~/.gitconfig, ~/.config/git/ignore
+(allow file-read*
+  (literal "/Users/brianlow/.gitconfig")
+  (subpath "/Users/brianlow/.config/git"))
+
+;; --- working dir -----------------------------------------------------------
+(allow file-read* file-write*
+  (subpath "/Users/brianlow/dev/claude-agent/sandbox-exec-prototype"))
+
+;; Claude walks up from cwd looking for a repo root and project CLAUDE.md.
+;; Read-only: the prototype can see the repo it lives in, but can't modify it.
+;; denials: file-read-data ~/dev/claude-agent/{.git,.gitignore,CLAUDE.md,...}
+(allow file-read* (subpath "/Users/brianlow/dev/claude-agent"))
+
+(allow file-read* file-write* (subpath "/private/var/folders"))
+(allow file-read* file-write* (subpath "/private/tmp"))
+
+;; --- network ---------------------------------------------------------------
+(allow network*)
+(allow system-socket)
+
+;; --- mach ------------------------------------------------------------------
+;; Named list, not a blanket (allow mach-lookup) — unrestricted mach-lookup is
+;; the confused-deputy hole the plan's step-5 IPC test targets. Note the
+;; absence of com.apple.appleevents / com.apple.coreservices.appleevents:
+;; that's what would let osascript drive Mail or Finder.
+(allow mach-lookup
+  (global-name "com.apple.system.notification_center")
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  (global-name "com.apple.system.logger")
+  (global-name "com.apple.diagnosticd")
+  (global-name "com.apple.logd")
+  (global-name "com.apple.logd.events")
+  (global-name "com.apple.system.DirectoryService.libinfo_v1")
+  (global-name "com.apple.SystemConfiguration.configd")
+  (global-name "com.apple.dnssd.service")
+  (global-name "com.apple.nehelper")
+  (global-name "com.apple.networkd")
+  (global-name "com.apple.usymptomsd")
+  (global-name "com.apple.trustd")
+  (global-name "com.apple.trustd.agent")
+  (global-name "com.apple.cfprefsd.daemon")
+  (global-name "com.apple.cfprefsd.agent")
+  (global-name "com.apple.coreservices.launchservicesd")
+  (global-name "com.apple.lsd.mapdb")
+  ;; denials: mach-lookup com.apple.SecurityServer / com.apple.securityd.xpc
+  (global-name "com.apple.SecurityServer")
+  (global-name "com.apple.securityd.xpc")
+  ;; denial: mach-lookup com.apple.FSEvents (file watching)
+  (global-name "com.apple.FSEvents"))
+
+(allow ipc-posix-shm)

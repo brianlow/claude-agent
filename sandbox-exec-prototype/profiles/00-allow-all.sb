@@ -1,0 +1,21 @@
+;; Phase 0 — no-op sandbox.
+;;
+;; Purpose: prove that wrapping `claude --remote-control` in sandbox-exec at all
+;; doesn't break dyld, subprocess spawning, or the Fleet pairing handshake,
+;; BEFORE any real restriction enters the picture.
+;;
+;; The two file-write denials below are NOT part of the diagnostic. They are a
+;; deliberate data-safety guard: this run also carries
+;; --dangerously-skip-permissions, so there is no app-layer boundary either.
+;; Denying writes to the Obsidian vault and the Bear database cannot affect the
+;; Phase 0 exit criteria (dyld / fork / network handshake), so it costs nothing
+;; diagnostically. If Phase 0 fails, re-test with these two lines removed to
+;; rule them out before concluding anything.
+
+(version 1)
+
+(allow default)
+
+(deny file-write*
+  (subpath "/Users/brianlow/Library/Mobile Documents/iCloud~md~obsidian/Documents/Brian's Vault")
+  (subpath "/Users/brianlow/Library/Group Containers/9K33E3U3T4.net.shinyfrog.bear"))
