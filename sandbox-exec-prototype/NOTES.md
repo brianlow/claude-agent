@@ -285,8 +285,92 @@ would still have been stopped.
 The spike has answered its question: `sandbox-exec` works for this, and the
 Apple-subscription blocker really was platform-based.
 
+### Revision 05 — Playwright / headless Chromium
+
+PLAN.md flagged Chromium as the hard one and budgeted several iterations. It
+took three, and the security news is better than expected.
+
+**Chromium runs fine without any of the grants that would have been
+alarming.** It asks for all of these, is denied all of these, and still exits
+0 and dumps the DOM:
+
+| requested | withheld because |
+|---|---|
+| `com.apple.windowserver.active` | GUI-session access — read the screen, and in general synthesize input into other apps. Same confused-deputy class as the rev-04 LaunchServices hole, and strictly worse. |
+| `com.apple.dock.server` | same GUI-session surface |
+| `com.apple.coreservices.launchservicesd` | this is the rev-04 hole; re-granting it would reopen `open -a` for the whole process tree |
+| `com.apple.pasteboard.1` | clipboard read — a direct exfiltration path to whatever the user last copied |
+| `com.apple.tccd.system` | asking the privacy daemon for grants |
+| `com.apple.CoreLocation.agent`, `locationd.desktop.registration` | location |
+
+These are permanent denials, not TODOs. Chromium degrades gracefully on all of
+them; the only visible cost is cosmetic log noise
+(`CVDisplayLinkCreateWithCGDisplay failed`, an `_LSModifyNotification`
+warning). Worth stating clearly because the denial-fixing loop's natural
+gravity is to grant whatever gets asked for — and `windowserver.active` in
+particular would have quietly undone most of the profile's value.
+
+What Chromium actually needed was mundane:
+
+- `process-exec*` on `~/Library/Caches/ms-playwright` and `~/.npm`
+  (the npx-resolved `@playwright/mcp/cli.js`)
+- `mach-register` + `mach-lookup` on
+  `org.chromium.Chromium.MachPortRendezvousServer.*` — it's multi-process and
+  rendezvouses with its children over a per-pid service it registers itself.
+  Without this it hard-fails: `bootstrap_check_in ... Permission denied`.
+  Regex-scoped to Chromium's own namespace.
+- `(allow signal (target children))` — it SIGTERMs its own renderers on
+  shutdown. Without it the denial is non-fatal but **renderer processes leak**,
+  which matters for an agent that runs for days. Still scoped to our own tree,
+  not `(target others)`.
+- `com.apple.DiskArbitration.diskarbitrationd`, `RootDomainUserClient`
+  (power management), and a few preference reads.
+
+`IOSurfaceRootUserClient` / `AGXDeviceUserClient` (GPU) stay denied — headless
+doesn't need them.
+
+Regression-checked after all of this: `verify.sh` still 16/16 (the `open -a`
+hole stays closed), and `claude -p` still returns `SANDBOX_PROBE_OK`.
+
+Incidentally confirmed correctly denied: the `kicad` MCP server in the user's
+global config (`~/dev/tmp/KiCAD-MCP-Server`). It's outside the allow-list and
+irrelevant to this agent, so its failure to start is the profile working.
+
+### Phase 2 (network) — descoped by decision, not by difficulty
+
+Resolved by the user rather than investigated: **full internet access is
+fine — the agent is meant to do web research.** So `(allow network*)` stays
+and no `pf` companion is needed.
+
+Worth recording what this costs, since PLAN.md treated it as a real goal: the
+profile constrains what the agent can *reach on this machine*, not what it can
+*send off it*. Anything inside the allow-list — vault contents, Bear notes,
+gcalcli tokens — can be exfiltrated over the network by a hostile operator.
+The filesystem boundary is the mitigation; the network is not. That is an
+accepted trade, and the right one given the intended use, but it should be an
+explicit trade rather than an assumed win.
+
 ### Still open
-- Playwright/Chromium MCP still denied
-  (`process-exec* ~/.npm/_npx/.../@playwright/mcp/cli.js`) — deliberately
-  deferred per PLAN.md, to keep denial noise attributable.
-- Phase 2 (network) not started.
+
+Everything PLAN.md asked for is answered. What's left is productionizing,
+which the plan scoped as a separate follow-on:
+
+- **Drop the spike scaffolding** from the profile: `~/dev/claude-agent` read
+  and `sandbox-exec-prototype` read/write. Nothing else should need them.
+- **Bear needs Full Disk Access** on whatever launches the agent, or Bear
+  reads stay broken (TCC, not Seatbelt — see above). Same grant the README
+  already documents for the container fleet.
+- **Decide on the Keychain grant** — the widest thing in the profile, and
+  unavoidable for this auth mechanism.
+- **launchd integration**: per-agent profiles and session names, `KeepAlive`,
+  and the reset-watcher path, mirroring `agent-run.sh` without touching it.
+- **Playwright MCP end-to-end**: headless Chromium is verified working under
+  the profile directly, but the full `claude → @playwright/mcp → browser`
+  path hasn't been driven from inside a live session yet.
+- `/private/tmp` is granted read/write and is world-writable and shared with
+  every other process on the machine. Probably worth narrowing to a private
+  temp dir.
+- `~/.claude` and `~/.npm` are both writable and executable, so the agent can
+  write a script there and run it. Not an escape — children inherit the
+  policy — but the profile controls what code can *reach*, not what code
+  *runs*.
