@@ -101,15 +101,33 @@ per-connection fingerprint seeds, i.e. the server side of the design
 
 ### Persistence
 
-A host directory (`~/.claude-sbx/browser-profile`) is bind-mounted for the
-user-data-dir, so cookies and history accrue across restarts — a browser that
-arrives with zero cookies on every launch is itself a mild tell and will eat more
+The user-data-dir is a host directory **inside this repo** —
+`sandbox-exec-prototype/browser-profile/`, added to `.gitignore` alongside
+`scratch/`, `logs/`, `generated/` and `launchd/` — bind-mounted into the
+container. Keeping it in the repo is a deliberate localization choice: browser
+state is visible next to the code that starts it, not a hidden directory
+elsewhere on the laptop.
+
+Cookies and history therefore accrue across restarts — a browser that arrives
+with zero cookies on every launch is itself a mild tell and will eat more
 challenges.
 
-**No account logins.** The volume therefore holds no retailer credentials. This
-matters more in a container than on the host: `NOTES.md` records
+Two consequences of the in-repo location, both benign:
+
+- The agent's Seatbelt profile denies all of `~/dev`, so `sbx-agent-1` cannot
+  read the cookie jar it is driving. That is a property worth keeping, not a
+  problem to fix.
+- `.gitignore` is the only thing keeping browser state out of commits, so the
+  entry must land in the same change that creates the directory.
+
+**No account logins.** The directory therefore holds no retailer credentials.
+This matters more here than on the host: `NOTES.md` records
 `Keychain lookup failed … (-50)`, meaning Chromium cannot keychain-encrypt
-cookies at rest, and that remains true in Linux (no OS keyring in the image).
+cookies at rest, and that remains true on Linux (no OS keyring in the image).
+
+Out of scope, noted because it is the same instinct: the fleet's logs and
+`pty-run.py` still live in `~/.claude-sbx/`. Relocating those touches the agent
+half and is a separate change.
 
 ## Components
 
@@ -137,7 +155,8 @@ Filenames and the launchd label `com.brianlow.claude-sbx.browser` are kept, so
      that exec'ing that binary still fails. A wedged browser must mean "no
      browser", never "an unconfined browser".
 - `fleet-common.sh` — the browser block becomes image / tag / container name /
-  volume path / CDP port. `render_browser_profile` and `cloak_bin` are deleted.
+  CDP port, plus `BROWSER_DATA_DIR="${SBX_DIR}/browser-profile"` (previously
+  `~/.claude-sbx/browser`). `render_browser_profile` and `cloak_bin` are deleted.
   `browser_pid` no longer matches a `--remote-debugging-port` command line;
   `browser_state` queries container state plus the existing `/json/version`
   probe, which stays because it is the only thing that detects a wedged browser
@@ -145,6 +164,8 @@ Filenames and the launchd label `com.brianlow.claude-sbx.browser` are kept, so
 
 **New**
 
+- `sandbox-exec-prototype/.gitignore` — add `browser-profile/`. Same change that
+  creates the directory, so browser state is never committable.
 - `verify-detection.sh` — drives the running container over CDP against
   `bot.incolumitas.com` and sannysoft, prints the scores, and records them in
   `NOTES.md`. Required because the browser binary changes; "better patches on
