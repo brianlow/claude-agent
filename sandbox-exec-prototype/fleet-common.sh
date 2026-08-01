@@ -34,8 +34,18 @@ BEAR_DIR="${HOME}/Library/Group Containers/9K33E3U3T4.net.shinyfrog.bear/Applica
 # that comes first on PATH.
 CLAUDE_BIN="${CLAUDE_BIN:-${HOME}/.local/bin/claude}"
 
-# launchd jobs inherit a minimal PATH; make binaries resolvable everywhere.
-export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+# launchd jobs inherit a minimal PATH, and it has to cover the actual toolchain,
+# not just system binaries. node/npm/npx live under asdf here, so a system-only
+# PATH means every npx-launched MCP server dies at startup with
+#   Executable not found in $PATH: "node"
+# — which reads like a missing install and isn't one. The Seatbelt profile
+# already grants read+exec on ~/.asdf and /opt/homebrew; this is purely about
+# resolution.
+#
+# ~/.asdf/bin as well as the shims: a shim execs ~/.asdf/bin/asdf by absolute
+# path, so it doesn't strictly need this, but anything invoking `asdf` directly
+# does.
+export PATH="${HOME}/.asdf/shims:${HOME}/.asdf/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
 label_for()   { printf '%s.%s' "${LABEL_PREFIX}" "$1"; }
 plist_for()   { printf '%s/%s.plist' "${PLIST_DIR}" "$(label_for "$1")"; }

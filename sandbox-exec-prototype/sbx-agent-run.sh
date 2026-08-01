@@ -13,6 +13,10 @@
 # sandbox-exec sits above claude, not inside it, which is the entire point:
 # nothing below that line can widen the policy, including claude itself.
 #
+# claude itself runs fully unrestricted at the app layer — permissions bypassed
+# AND its own sandbox off (see the --settings install below). That's deliberate:
+# one boundary, in the kernel, where the session operator can't reach it.
+#
 # Why pty-run.py instead of `script -q /dev/null`: `script` is fine from an
 # interactive terminal (that's what the prototype's run-test.sh uses) but fails
 # two ways under launchd.
@@ -35,6 +39,7 @@ SESSION="$(session_for "$N")"
 PROFILE="$(profile_for "$N")"
 DEBUG_LOG="${LOG_DIR}/agent-${N}-debug.log"
 PTY_RUN="${HOME}/.claude-sbx/pty-run.py"
+SETTINGS="${HOME}/.claude-sbx/settings.json"
 
 mkdir -p "${LOG_DIR}" "${GEN_DIR}"
 
@@ -61,6 +66,28 @@ render_profile "$N" > "${PROFILE}"
 # on every launch — which also keeps it in sync with the source.
 install -m 0755 "${SCRIPT_DIR}/pty-run.py" "${PTY_RUN}"
 
+# Turn Claude Code's own in-app sandbox OFF for fleet agents. Same reason the
+# file has to live here rather than in the repo: ~/dev is denied.
+#
+# The user's global ~/.claude/settings.json sets sandbox.enabled = true with
+# denyRead ["/", "~/"] / allowRead ["~/dev"], which the agent inherits. Under
+# sandbox-exec that layer is worse than redundant:
+#
+#   - it's the *app's* boundary, and this whole prototype exists because an
+#     in-app boundary can be talked out of by a hostile session operator. The
+#     kernel one below already covers everything it covers, and more (~/dev is
+#     allowed by Claude's policy and denied by ours).
+#   - it forces dangerouslyDisableSandbox — and so a permission round-trip — on
+#     every command that touches an allow-listed path like Bear.
+#   - both layers return an identical "Operation not permitted", so having two
+#     of them makes denials unattributable. That cost is documented: NOTES.md's
+#     criterion-#3 section needed a dedicated discriminator (~/dev) to tell the
+#     layers apart, and a later in-session test misread Seatbelt denials as TCC.
+#
+# --settings takes precedence over the user settings file (verified: the same
+# `ls ~/Documents` that returns EPERM without it lists the directory with it).
+install -m 0644 "${SCRIPT_DIR}/fleet-settings.json" "${SETTINGS}"
+
 [ -x "${CLAUDE_BIN}" ] || { echo "claude not executable at ${CLAUDE_BIN}" >&2; exit 1; }
 [ -d "${VAULT}" ]      || { echo "vault not found at ${VAULT}" >&2; exit 1; }
 
@@ -77,6 +104,8 @@ echo "$(date '+%Y-%m-%dT%H:%M:%S') starting ${SESSION}"
 echo "  profile : ${PROFILE}"
 echo "  workdir : ${VAULT}"
 echo "  claude  : ${CLAUDE_BIN} ($("${CLAUDE_BIN}" --version 2>/dev/null || echo '?'))"
+echo "  settings: ${SETTINGS} (in-app sandbox off)"
+echo "  node    : $(command -v node || echo 'NOT ON PATH')"
 echo "  debug   : ${DEBUG_LOG}"
 
 cd "${VAULT}"
@@ -84,6 +113,7 @@ exec caffeinate -dims \
   sandbox-exec -f "${PROFILE}" \
   /usr/bin/python3 "${PTY_RUN}" 120 40 \
   "${CLAUDE_BIN}" \
+    --settings "${SETTINGS}" \
     --dangerously-skip-permissions \
     --permission-mode bypassPermissions \
     --remote-control "${SESSION}" \

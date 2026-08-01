@@ -280,3 +280,6 @@ Ready to build:
    Needs its own sentinel and its own reset script if wanted.
 6. **Narrow `/private/tmp`** to a private temp dir — it's currently granted
    read/write and is world-writable and shared with every process on the Mac.
+7. **Update the vault docs** (`Bear DB.md`, `Browser Automation.md`) for the
+   native fleet — they still document container mount paths. Lives outside this
+   repo, so it's a separate edit in the vault, not a change here.

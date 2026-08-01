@@ -441,6 +441,123 @@ install native-messaging manifests into Chrome/Brave/Arc support dirs with
 `EPERM`. That's the profile working as intended — those directories aren't on
 the allow-list and a headless agent has no business writing to them.
 
+### Two fixes from the first real in-session test drive (2026-08-01)
+
+A live session was asked to (1) read a Bear note, (2) write to the vault, (3)
+drive CloakBrowser. Test 2 passed. The other two produced a bug and a
+misdiagnosis, both instructive.
+
+**PATH: the agent had no Node at all.** The session reported `node`/`npm`/`npx`
+"missing" and concluded the machine has no Node runtime. It doesn't have one on
+*its* PATH — `fleet-common.sh` was exporting only
+`/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`, and node lives in
+`~/.asdf/shims`. The Seatbelt profile already granted read+exec on `~/.asdf`
+and `/opt/homebrew`; nothing was denied. Purely a resolution bug, and it was
+visible in the debug log all along:
+
+```
+[ERROR] MCP server "playwright" Connection failed (ENOENT): Executable not found in $PATH: "npx"
+[ERROR] MCP server "kicad"      Connection failed (ENOENT): Executable not found in $PATH: "node"
+```
+
+So **every npx-launched MCP server had been failing since the fleet first
+started**, Playwright included — which is why "Playwright MCP end-to-end" below
+was never going to work as written. Fixed by prepending `~/.asdf/shims`,
+`~/.asdf/bin` and `/opt/homebrew/bin`. After the fix `playwright` connects
+(`Successfully connected (transport: stdio) in 1016ms`).
+
+`kicad` now fails *differently* — it starts, then `MCP error -32000: Connection
+closed` — because its code is in `~/dev/tmp`, which the profile denies. That is
+the profile working, and the better failure mode: denied, not unresolvable.
+
+One gotcha for anyone probing this by hand: run the probe with cwd inside the
+vault. From `~/dev` (denied) node dies at startup with
+`EPERM: operation not permitted, uv_cwd` before it does anything else, which
+looks like a Node problem and isn't.
+
+**Claude Code's own sandbox is now explicitly off** — `fleet-settings.json`,
+installed to `~/.claude-sbx/settings.json` and passed with `--settings`.
+The user's global `~/.claude/settings.json` sets `sandbox.enabled: true` with
+`denyRead ["/", "~/"]`, `allowRead ["~/dev"]`, and fleet agents inherited it.
+Under sandbox-exec that layer is redundant at best: it is the *app's* boundary,
+which is the thing this prototype exists to stop relying on, and it costs a
+`dangerouslyDisableSandbox` round-trip on every command touching an
+allow-listed path. Verified on the host: `ls ~/Library/Caches/ms-playwright`
+returns `Operation not permitted` with the user settings, and lists with
+`--settings` pointed at the fleet file.
+
+Worth knowing, though not relied on: nested under `sandbox-exec` the in-app
+sandbox appears to *already* self-disable — the same `ls` succeeded first try
+under the profile even without `--settings`, while failing on the host. Seatbelt
+can't meaningfully nest, and `isSandboxingEnabled()` requires its init to be
+error-free. The `--settings` file makes the state declared instead of emergent.
+
+**The session couldn't attribute its own denials** — the recurring theme. It
+reported `/Applications` as blocked by TCC (it's Seatbelt — the profile has no
+rule for `/Applications`), and read `~/dev`, `/Volumes` and `~/Library` denials
+as Claude Code's sandbox when the profile denies them outright. Same lesson as
+the criterion-#3 discriminator: an agent inside the box narrates its own system
+prompt's policy, not the kernel's. Attribution has to come from outside — the
+Seatbelt log, or a path the two layers treat differently.
+
+### Finding: the filesystem boundary is not the whole boundary
+
+The same debug log shows this, every launch:
+
+```
+MCP server "claude.ai Google Drive": Successfully connected (transport: claudeai-proxy)
+MCP server "claude.ai Gmail":        Successfully connected (transport: claudeai-proxy)
+```
+
+Account-level connectors, reached over HTTPS via `mcp-proxy.anthropic.com`.
+Seatbelt sees a socket. The threat model in PLAN.md is a hostile operator of the
+session — that operator does not need `~/.ssh` if they can read the mail.
+
+This is **not** the network trade-off already accepted above: that one is about
+*exfiltrating* allow-listed data. This is inbound reach into accounts that were
+never on the allow-list, and no filesystem profile can constrain it.
+
+**Resolved (2026-08-01): the user removed the Gmail, Google Drive and Google
+Calendar connectors from the account.** That closes it at the source rather than
+per-agent, and it closes it for every client, not just the fleet. Note the
+consequence for the profile's shape: this was never a Seatbelt problem and could
+not have been fixed in the `.sb` file — worth remembering the next time a
+capability shows up that the filesystem boundary simply doesn't see.
+
+Related and currently closed by accident rather than intent:
+`[Claude in Chrome] Extension not found in any browser`. That path would drive
+the real, logged-in Chrome from outside the sandbox — the same confused-deputy
+class as the rev-04 LaunchServices hole. It fails today because the browser
+support dirs aren't on the allow-list. Worth keeping shut deliberately.
+
+Also worth stating plainly: `(allow file-read-metadata)` is global, so the agent
+can enumerate every path on the machine — filenames, project names, directory
+structure — while being unable to read contents. Accepted for path resolution,
+but it is a real leak, not nothing.
+
+### CloakBrowser under Seatbelt — what it would actually take
+
+Neither `CloakBrowser` nor `agent-browser` is installed on this host (checked
+unsandboxed: no bundle in `/Applications`, not in `npm ls -g`). The vault's
+`Browser Automation.md` describes the container world and is stale. Beyond
+installing them:
+
+- **Not in `/Applications`** — the profile has no rule there, and granting one
+  opens more than the bundle.
+- **Exec the binary directly** (`…app/Contents/MacOS/…`), never `open -a`:
+  `/usr/bin/open` is exec-denied and `launchservicesd` was removed in rev 04.
+  Re-adding it to launch a browser would reopen the escape.
+- **Its mach namespace won't match.** The rendezvous rules are regex-scoped to
+  `^org\.chromium\.Chromium\.MachPortRendezvousServer\.`; a rebranded fork
+  registers elsewhere and hard-fails `bootstrap_check_in … Permission denied`.
+- **Headful is the real question.** Headless Chromium runs fine without
+  `windowserver.active` (rev 05). An anti-detect browser's value is fingerprint
+  realism, which tends to want a real GUI session — and that grant is the one
+  the profile most deliberately withholds. If it turns out to need it, the
+  answer is probably a *second*, differently-privileged sandbox for the browser
+  (windowserver, no vault/Bear/Keychain), driven over localhost CDP — not
+  merging the two capability sets into one profile.
+
 ### Still open
 
 Everything PLAN.md asked for is answered. What's left is productionizing,
@@ -455,12 +572,17 @@ which the plan scoped as a separate follow-on:
   unavoidable for this auth mechanism.
 - **launchd integration**: per-agent profiles and session names, `KeepAlive`,
   and the reset-watcher path, mirroring `agent-run.sh` without touching it.
-- **Playwright MCP end-to-end**: headless Chromium is verified working under
-  the profile directly, but the full `claude → @playwright/mcp → browser`
-  path hasn't been driven from inside a live session yet.
+- **Playwright MCP end-to-end**: the server now *connects* (it never could
+  before the PATH fix), but `claude → @playwright/mcp → browser` still hasn't
+  been driven from inside a live session.
 - `/private/tmp` is granted read/write and is world-writable and shared with
   every other process on the machine. Probably worth narrowing to a private
   temp dir.
+- **Update the vault docs for the native fleet.** `Bear DB.md` and
+  `Browser Automation.md` still describe container-era paths and mounts
+  (`/mnt/...`), which are wrong for a sandbox-exec agent — it sees real host
+  paths, Bear reads are TCC-blocked, and `Claude in Chrome` is deliberately
+  shut. Outside this repo, so not touched here.
 - `~/.claude` and `~/.npm` are both writable and executable, so the agent can
   write a script there and run it. Not an escape — children inherit the
   policy — but the profile controls what code can *reach*, not what code
