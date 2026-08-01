@@ -233,6 +233,35 @@
 ;; If headless Chromium turns out to genuinely require windowserver, that is a
 ;; finding that belongs in the writeup, not a line quietly added here.
 
+;; --- cloakbrowser / agent-browser ------------------------------------------
+;; The browser we actually want for bot-protected sites: CloakBrowser (a
+;; Chromium fork with source-level fingerprint patches) driven by the
+;; `agent-browser` CLI. Plain fetch/WebFetch handles everything else, so this
+;; is the narrow case, not the default.
+;;
+;; Cheaper to confine than NOTES.md predicted, on two counts:
+;;
+;;   1. The binary self-installs to ~/.cloakbrowser/chromium-<ver>/Chromium.app
+;;      — a single subpath under $HOME, not /Applications. No rule outside the
+;;      home directory, and nothing else in the bundle's parent to over-grant.
+;;   2. The fork keeps CFBundleIdentifier = org.chromium.Chromium, so its
+;;      per-pid rendezvous service lands in the *existing* regex above. No new
+;;      mach namespace, no widening.
+;;
+;; Exec but never write: an agent that can rewrite the browser binary it is
+;; about to run has no boundary worth the name.
+(allow file-read* process-exec* (subpath "__HOME__/.cloakbrowser"))
+
+;; agent-browser's daemon state: unix socket, config.json, saved auth state.
+;; denial: 'Socket directory ~/.agent-browser is not writable' (os error 1)
+;; Writable because the socket has to be created here; scoped to the one dir.
+;; Note this is where --session-name persists cookies, so treat it as
+;; credential-bearing — same care as ~/.gcalcli.
+(allow file-read* file-write* (subpath "__HOME__/.agent-browser"))
+
+;; denial: user-preference-read org.chromium.chromium
+(allow user-preference-read (preference-domain "org.chromium.chromium"))
+
 ;; --- pty launcher ----------------------------------------------------------
 ;; /usr/bin/python3 is only a shim; the real interpreter and its stdlib live
 ;; under /Library/Developer/CommandLineTools. Read+exec, never write.

@@ -195,18 +195,24 @@ sandbox-exec-prototype/
     04-no-launchservices.sb      closes the `open -a` hole
     05-playwright.sb             headless Chromium
     06-production.sb.template    05 minus spike scaffolding; templated paths
+    07-browser.sb.template       the SECOND sandbox — CloakBrowser only
 
   # spike tooling (interactive)
   run-test.sh              sandbox-exec + claude --remote-control, from a terminal
   probe.sh                 `claude -p` under a profile + every Seatbelt denial
   probe-chromium.sh        headless Chromium under a profile + denials
+  probe-cloakbrowser.sh    CloakBrowser + agent-browser under a profile + denials
   verify.sh                the security assertions (Phase 1 step 5) — 16 checks
+  verify-browser.sh        the browser sandbox's assertions — 20 checks
 
   # fleet (launchd)
   fleet-common.sh          config + plist/profile rendering
   sbx-agent-run.sh         one agent, foreground, launchd-managed
+  sbx-browser-run.sh       CloakBrowser in its own sandbox, CDP on loopback
   sbx-start.sh / sbx-stop.sh / sbx-status.sh
   pty-run.py               pty with a real window size (replaces `script`)
+  fleet-settings.json      installed as --settings; in-app sandbox off
+  agent-browser-config.json installed via AGENT_BROWSER_CONFIG; points at CDP
 
   generated/               rendered per-agent profiles   (gitignored)
   launchd/                 rendered plists               (gitignored)
@@ -250,8 +256,16 @@ name in that list should trace to an observed denial *and* a reason.
 **Read `NOTES.md` first** — it carries the findings and the full open list.
 
 Current state: `sbx-agent-1` runs under launchd, sandboxed, cwd = the vault,
-paired to Fleet. `./sbx-status.sh` to check, `./sbx-start.sh` / `./sbx-stop.sh`
-to control. The Apple Container fleet is untouched and not running.
+paired to Fleet — **plus a second launchd job running CloakBrowser in its own
+Seatbelt profile**, which the agent drives over localhost CDP. `./sbx-status.sh`
+to check both, `./sbx-start.sh` / `./sbx-stop.sh` to control. The Apple
+Container fleet is untouched and not running.
+
+The browser could not be put in the agent's profile — it needs LaunchServices
+and WindowServer, which are the exact grants rev 04 and rev 05 removed. Read
+"CloakBrowser — built" in NOTES.md before touching either profile; the split is
+load-bearing, and the reason it is safe is that **launchd owns the browser's
+command line, not the agent**.
 
 Ground rule still in force: **nothing outside `sandbox-exec-prototype/` gets
 modified** — not `entrypoint.sh`, `agent-run.sh`, `common.sh`, `Dockerfile`,
@@ -271,7 +285,8 @@ Ready to build:
 
 3. **Playwright end-to-end.** Headless Chromium is verified under the profile
    directly, but `claude → @playwright/mcp → browser` has never been driven
-   from inside a live session.
+   from inside a live session. Lower priority now that the CloakBrowser path
+   works end to end (see NOTES.md, "CloakBrowser — built").
 4. **Scale past one agent.** `AGENTS=(1)` in `fleet-common.sh`. Worth thinking
    about whether N agents sharing one vault cwd is actually wanted — note the
    container fleet had the same property, so this isn't a regression.
@@ -280,6 +295,7 @@ Ready to build:
    Needs its own sentinel and its own reset script if wanted.
 6. **Narrow `/private/tmp`** to a private temp dir — it's currently granted
    read/write and is world-writable and shared with every process on the Mac.
-7. **Update the vault docs** (`Bear DB.md`, `Browser Automation.md`) for the
-   native fleet — they still document container mount paths. Lives outside this
-   repo, so it's a separate edit in the vault, not a change here.
+7. **Update the vault docs** for the native fleet — they still document
+   container mount paths. `Browser Automation.md` — **done** (rewritten for the
+   split-sandbox CDP setup). `Bear DB.md` — still stale, and blocked on the FDA
+   decision above, since whether Bear is readable at all depends on it.

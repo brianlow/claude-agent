@@ -31,5 +31,22 @@ for n in "${AGENTS[@]}"; do
   fi
 done
 
+if is_loaded_label "$(browser_label)"; then
+  echo "browser: booting out..."
+  launchctl bootout "${GUI_DOMAIN}/$(browser_label)" \
+    || echo "browser: WARNING — bootout failed."
+  for _ in 1 2 3 4 5; do
+    [ -z "$(browser_pid)" ] && break
+    sleep 1
+  done
+  # Chromium is multi-process; bootout kills the job's own process, and the
+  # profile's (allow signal (target children)) lets it take its renderers with
+  # it. Confirm rather than assume — a leaked renderer holds the CDP port.
+  bpid="$(browser_pid)" || true
+  [ -n "$bpid" ] && { echo "browser: still running — sending TERM to $bpid"; kill "$bpid" 2>/dev/null || true; }
+else
+  echo "browser: not loaded."
+fi
+
 echo
 print_status

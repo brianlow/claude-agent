@@ -535,7 +535,26 @@ can enumerate every path on the machine — filenames, project names, directory
 structure — while being unable to read contents. Accepted for path resolution,
 but it is a real leak, not nothing.
 
-### CloakBrowser under Seatbelt — what it would actually take
+### CloakBrowser under Seatbelt — what it would actually take (SUPERSEDED)
+
+> **Superseded 2026-08-01 by "CloakBrowser — built" below, which is the
+> authoritative account.** Kept because the scorecard is instructive: this
+> section was written without the software installed, and it got the
+> *conclusion* right (headful/GUI is the real conflict; the answer is a second,
+> differently-privileged sandbox driven over CDP) while getting most of the
+> *reasons* wrong.
+>
+> | prediction | reality |
+> |---|---|
+> | "Not in `/Applications` — granting a rule there opens more than the bundle" | Wrong problem. It self-installs to `~/.cloakbrowser/chromium-<ver>/Chromium.app` — one subpath under `$HOME`, nothing to over-grant. |
+> | "Its mach namespace won't match; a rebranded fork registers elsewhere" | Wrong. The fork keeps `CFBundleIdentifier = org.chromium.Chromium`, so the rev-05 regex covers it. (There *was* a second namespace — `org.chromium.Chromium.apps.*` — but that's the full app vs headless_shell, not the rebranding.) |
+> | "Headful is the real question" | **Right**, and worse than expected: it needs LaunchServices to avoid `abort()` and WindowServer to avoid `SIGSEGV`, even under `--headless`. |
+> | "The answer is probably a second sandbox … driven over localhost CDP" | **Right**, and that is what was built. |
+>
+> The transferable lesson is the one this file keeps re-learning: predictions
+> about *which* rule will bite are cheap and usually wrong; the denial log is
+> the only thing that actually knows.
+
 
 Neither `CloakBrowser` nor `agent-browser` is installed on this host (checked
 unsandboxed: no bundle in `/Applications`, not in `npm ls -g`). The vault's
@@ -558,6 +577,134 @@ installing them:
   (windowserver, no vault/Bear/Keychain), driven over localhost CDP — not
   merging the two capability sets into one profile.
 
+## CloakBrowser — built (2026-08-01), split sandbox
+
+Working end to end: a live agent inside its own sandbox drives CloakBrowser
+inside a *different* sandbox, and passes bot detection.
+
+### Why it could not go in the agent's profile
+
+Not a tuning problem — a hard incompatibility, found from the crash report
+rather than guessed:
+
+```
+abort() called
+HIServices  ___RegisterApplication_block_invoke
+HIServices  TransformProcessType
+Chromium Framework  ChromeMain
+```
+
+`TransformProcessType` is a **LaunchServices** call, and LaunchServices is
+exactly the mach-lookup revision 04 removed to close the `open -a` escape.
+Grant it back and it gets further, then `SIGSEGV`s in `-[NSWindow _close]`
+unless **WindowServer** is granted too — the full `Chromium.app` does real
+AppKit window work even under `--headless`.
+
+Playwright's `headless_shell` tolerated both denials (rev 05). CloakBrowser
+ships **only** the full bundle — the C++ fingerprint patches *are* the browser,
+so there is no headless-shell variant to retreat to. The two capability sets
+are irreconcilable in one profile, so they live in two:
+
+| | agent profile | browser profile |
+|---|---|---|
+| vault / Bear / Keychain / gcalcli | **yes** | **no** — content *and* metadata |
+| WindowServer / LaunchServices | **no** | **yes** |
+| reaches the other via | CDP on 127.0.0.1:9222 | — |
+
+`sbx-browser-run.sh` + `profiles/07-browser.sb.template`, launchd job
+`com.brianlow.claude-sbx.browser`. `verify-browser.sh` → **20/20**;
+`verify.sh` on the agent profile → still **16/16**, no regression.
+
+### The security argument, and its holes
+
+What genuinely holds:
+
+- **launchd owns the browser's command line, not the agent.** A hostile session
+  operator cannot add `--allow-file-access` (which would let pages read local
+  files), repoint `--user-data-dir`, or load an extension. This is the load-
+  bearing property; without it the split is decorative.
+- **CDP has no verb that spawns a process.** What the agent gets is page-level
+  control, not host code execution.
+- **Failure degrades safely.** With no CDP port reachable, `agent-browser`
+  falls back to auto-launching `/Applications/Google Chrome` — and the agent
+  profile denies it (`Operation not permitted (os error 1)`). So a wedged
+  browser job means "no browser", never "an unconfined browser".
+- The browser sandbox is denied `pasteboard.1` (clipboard), `tccd`,
+  `CoreLocation`, `bird` (iCloud), `metadata.mds`/Spotlight and `dock.server`,
+  and runs fine without them. Granting the GUI surface was not treated as a
+  licence to grant everything GUI-adjacent.
+
+What does not, and should be said plainly:
+
+1. **The rev-04 escape is moved, not deleted.** The browser sandbox holds
+   LaunchServices and WindowServer. Code execution *in that process* — a
+   Chromium exploit from a hostile page — lands somewhere that can launch
+   unconfined GUI apps. `open`/`osascript` are exec-denied and `verify-browser`
+   asserts it, but that is defense in depth over a granted capability, not the
+   capability's absence. The mitigating fact is that there is nothing of value
+   in reach there.
+2. **CDP is unauthenticated.** Chromium's debug port trusts every local
+   connection, so *any* process on this Mac can drive the browser, not only our
+   agent. Loopback keeps it off the network; there is no auth to add.
+3. **The browser data dir is credential-bearing.** Cookies and any logged-in
+   session live in `~/.claude-sbx/browser/default`. Worse, the log shows
+   `Keychain lookup failed … (-50)` — that is the Keychain deny working, and it
+   means Chromium cannot use the OS keychain to encrypt cookies at rest. A
+   browser that can log in is a secret store however tight its profile is.
+4. Two sandboxes and two restart levers now. `KeepAlive` restarts a browser
+   that *exits*; a browser that wedges while still running is invisible to it,
+   which is why `sbx-status.sh` probes `/json/version` rather than trusting the
+   pid.
+
+### Finding: `(deny file-read*)` does NOT cover `file-read-metadata`
+
+Non-obvious, and it briefly produced a real hole in the browser profile:
+
+```
+(deny file-read*        (subpath "<vault>"))  →  ls -l <vault>/CLAUDE.md   SUCCEEDS
+(deny file-read-metadata (subpath "<vault>")) →  ls -l ...  Operation not permitted
+```
+
+`(import "bsd.sb")` grants `file-read-metadata` broadly and a later
+`(deny file-read*)` does not take it back — the operation has to be named
+explicitly. Until it was, the GUI-privileged sandbox could enumerate the vault
+(filenames, sizes, mtimes) while being unable to read a byte of content.
+
+This also sharpens the existing note that the *agent* profile's global
+`(allow file-read-metadata)` is a real enumeration leak: it is not merely
+convenient there, it is not revocable by the obvious rule either.
+
+Worth noting how it was nearly missed: the first check used `ls`, which needs
+only metadata, and reported FAIL for the vault. The reflex is to distrust the
+test; here the test was right about *something* and wrong about *what*. Content
+was denied all along. Both operations are now asserted separately in
+`verify-browser.sh`, because they fail separately.
+
+### Smaller things worth keeping
+
+- **`--no-sandbox` is required, and is not what it sounds like.** Chromium's own
+  sandbox is Seatbelt-based and Seatbelt does not nest; inside `sandbox-exec`
+  the zygote cannot issue its extension (`deny file-issue-extension …
+  com.apple.app-sandbox.read`) and the browser dies before writing
+  `DevToolsActivePort`. What is lost is Chromium's internal renderer/browser
+  split, not our boundary — every process in the tree is still confined by the
+  profile, which is the stronger of the two.
+- **GPU grants are worth it for stealth.** With `--disable-gpu` and no IOKit
+  access, sannysoft reports `WebGL Vendor: Canvas has no webgl context` — and
+  "no WebGL" is itself a fingerprint tell, which would defeat the point. With
+  `IOSurfaceRootUserClient` / `AGXDeviceUserClient` / `IOAccel*` granted it
+  reports `ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro)`. GPU access is a
+  rendering capability, not a data one.
+- **The code-sign clone needs `file-link`, not just `file-write*`.** Modern
+  Chromium `clonefile()`s its own bundle into
+  `/private/var/folders/.../org.chromium.Chromium.code_sign_clone/`;
+  a write grant alone yields `forbidden-link-priv<file-write*>`.
+- **Probe with cwd somewhere the profile allows.** Same trap as the PATH fix:
+  from a denied cwd things die at startup in ways that look unrelated.
+- `verify.sh`'s Bear probe can **hang for minutes** rather than failing fast —
+  TCC blocking, not Seatbelt. Kill the `ls` and the run completes. Pre-existing,
+  not caused by any of this.
+
 ### Still open
 
 Everything PLAN.md asked for is answered. What's left is productionizing,
@@ -574,7 +721,16 @@ which the plan scoped as a separate follow-on:
   and the reset-watcher path, mirroring `agent-run.sh` without touching it.
 - **Playwright MCP end-to-end**: the server now *connects* (it never could
   before the PATH fix), but `claude → @playwright/mcp → browser` still hasn't
-  been driven from inside a live session.
+  been driven from inside a live session. Lower priority now that CloakBrowser
+  covers the browser case end to end — but note the two are independent paths:
+  Playwright drives `headless_shell` *inside* the agent sandbox, CloakBrowser
+  is driven over CDP in the *other* sandbox.
+- **CloakBrowser from a live remote-control session.** Verified by driving
+  `agent-browser` under the agent's own profile, which is the same enforcement
+  path — but not yet from inside a real Fleet session.
+- **Decide whether the browser should stay logged in.** `--session-name`
+  persistence is off today. Turning it on makes the browser sandbox
+  credential-bearing, and cookies there are not keychain-encrypted (see above).
 - `/private/tmp` is granted read/write and is world-writable and shared with
   every other process on the machine. Probably worth narrowing to a private
   temp dir.

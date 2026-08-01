@@ -8,7 +8,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/fleet-common.sh"
 
-mkdir -p "${PLIST_DIR}" "${LOG_DIR}" "${GEN_DIR}"
+mkdir -p "${PLIST_DIR}" "${LOG_DIR}" "${GEN_DIR}" "${BROWSER_DATA_DIR}"
+
+# Browser first: it's what the agents talk to, and it takes a few seconds to
+# come up. Skipped without complaint if CloakBrowser isn't installed — the
+# agents are perfectly useful without it.
+if [ -n "$(cloak_bin)" ]; then
+  render_browser_plist > "$(browser_plist)"
+  if is_loaded_label "$(browser_label)"; then
+    echo "browser: already loaded — leaving running."
+  else
+    echo "browser: bootstrapping..."
+    launchctl bootstrap "${GUI_DOMAIN}" "$(browser_plist)" \
+      || echo "browser: WARNING — bootstrap failed (see ${LOG_DIR}/browser.log)."
+  fi
+else
+  echo "browser: CloakBrowser not installed — skipping."
+  echo "         to enable: npm install -g cloakbrowser && cloakbrowser install"
+fi
 
 for n in "${AGENTS[@]}"; do
   render_plist "$n" > "$(plist_for "$n")"

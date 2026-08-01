@@ -40,6 +40,7 @@ PROFILE="$(profile_for "$N")"
 DEBUG_LOG="${LOG_DIR}/agent-${N}-debug.log"
 PTY_RUN="${HOME}/.claude-sbx/pty-run.py"
 SETTINGS="${HOME}/.claude-sbx/settings.json"
+AB_CONFIG="${HOME}/.claude-sbx/agent-browser.json"
 
 mkdir -p "${LOG_DIR}" "${GEN_DIR}"
 
@@ -88,6 +89,24 @@ install -m 0755 "${SCRIPT_DIR}/pty-run.py" "${PTY_RUN}"
 # `ls ~/Documents` that returns EPERM without it lists the directory with it).
 install -m 0644 "${SCRIPT_DIR}/fleet-settings.json" "${SETTINGS}"
 
+# Point agent-browser at the browser sandbox's CDP port, so the agent doesn't
+# have to know it exists — `agent-browser open <url>` just works and lands in
+# the sandboxed CloakBrowser.
+#
+# Via AGENT_BROWSER_CONFIG rather than ~/.agent-browser/config.json, which is
+# shared with whatever the human runs on the host: the fleet should not silently
+# repoint an interactive agent-browser at the fleet's browser.
+#
+# Note what this does NOT do: it gives the agent no way to *launch* a browser.
+# That's the design. Without a reachable CDP port, agent-browser falls back to
+# auto-launching /Applications/Google Chrome, and the profile denies it —
+#   Failed to launch Chrome at "/Applications/Google Chrome.app/...":
+#   Operation not permitted (os error 1)
+# — so a wedged browser job degrades to "no browser", never to "an unconfined
+# browser outside the sandbox".
+install -m 0644 "${SCRIPT_DIR}/agent-browser-config.json" "${AB_CONFIG}"
+export AGENT_BROWSER_CONFIG="${AB_CONFIG}"
+
 [ -x "${CLAUDE_BIN}" ] || { echo "claude not executable at ${CLAUDE_BIN}" >&2; exit 1; }
 [ -d "${VAULT}" ]      || { echo "vault not found at ${VAULT}" >&2; exit 1; }
 
@@ -106,6 +125,7 @@ echo "  workdir : ${VAULT}"
 echo "  claude  : ${CLAUDE_BIN} ($("${CLAUDE_BIN}" --version 2>/dev/null || echo '?'))"
 echo "  settings: ${SETTINGS} (in-app sandbox off)"
 echo "  node    : $(command -v node || echo 'NOT ON PATH')"
+echo "  browser : CDP 127.0.0.1:${BROWSER_CDP_PORT} (via ${AB_CONFIG})"
 echo "  debug   : ${DEBUG_LOG}"
 
 cd "${VAULT}"
