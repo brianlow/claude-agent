@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# fleet-common.sh — shared config + helpers for the sandbox-exec fleet.
+# SOURCE this file; do not execute it. Deliberately does NOT set
+# `set -euo pipefail` so it can't alter a caller's shell options.
+#
+# This fleet is entirely self-contained under sandbox-exec-prototype/ and
+# shares NOTHING with the Apple Container fleet in the parent directory:
+#
+#   | thing          | container fleet                  | this fleet                       |
+#   |----------------|----------------------------------|----------------------------------|
+#   | launchd label  | com.brianlow.claude-agent.N      | com.brianlow.claude-sbx.N        |
+#   | plists         | ../launchd/                      | ./launchd/                       |
+#   | logs           | ~/.claude-agent/logs/            | ~/.claude-sbx/logs/              |
+#   | session names  | agent-N                          | sbx-agent-N                      |
+#   | isolation      | Linux container                  | sandbox-exec (Seatbelt)          |
+#
+# Distinct on every axis, so both can be loaded at once without interfering.
+# No script in the parent directory is read, written, or executed from here.
+
+SBX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+AGENTS=(1)                                   # fleet of 1 for now
+LABEL_PREFIX="com.brianlow.claude-sbx"
+LOG_DIR="${HOME}/.claude-sbx/logs"
+PLIST_DIR="${SBX_DIR}/launchd"
+GEN_DIR="${SBX_DIR}/generated"
+PROFILE_TEMPLATE="${SBX_DIR}/profiles/06-production.sb.template"
+GUI_DOMAIN="gui/$(id -u)"
+
+VAULT="${HOME}/Library/Mobile Documents/iCloud~md~obsidian/Documents/Brian's Vault"
+BEAR_DIR="${HOME}/Library/Group Containers/9K33E3U3T4.net.shinyfrog.bear/Application Data"
+
+# Plain Claude Code from the official installer — NOT the cmux-wrapped binary
+# that comes first on PATH.
+CLAUDE_BIN="${CLAUDE_BIN:-${HOME}/.local/bin/claude}"
+
+# launchd jobs inherit a minimal PATH; make binaries resolvable everywhere.
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+
+label_for()   { printf '%s.%s' "${LABEL_PREFIX}" "$1"; }
+plist_for()   { printf '%s/%s.plist' "${PLIST_DIR}" "$(label_for "$1")"; }
+profile_for() { printf '%s/sbx-agent-%s.sb' "${GEN_DIR}" "$1"; }
+session_for() { printf 'sbx-agent-%s' "$1"; }
+
+is_loaded_label() { launchctl print "${GUI_DOMAIN}/$1" &>/dev/null; }
+is_loaded()       { is_loaded_label "$(label_for "$1")"; }
+
+# Is the agent's claude process actually alive? There's no container to query,
+# so match the remote-control session name on the command line.
+agent_pid() { pgrep -f -- "--remote-control $(session_for "$1")" 2>/dev/null | head -1; }
+
+agent_state() {
+  local pid; pid="$(agent_pid "$1")"
+  if [ -n "$pid" ]; then printf 'running (pid %s)' "$pid"; else printf 'absent'; fi
+}
+
+# Render the Seatbelt profile from its template. Paths are substituted rather
+# than hardcoded so this isn't tied to one username, and so the log directory
+# stays in sync with the fleet config above.
+render_profile() {
+  local n="$1"
+  sed -e "s|__HOME__|${HOME}|g" \
+      -e "s|__VAULT__|${VAULT}|g" \
+      -e "s|__LOGDIR__|${HOME}/.claude-sbx|g" \
+      "${PROFILE_TEMPLATE}"
+}
+
+render_plist() {
+  local n="$1" label log
+  label="$(label_for "$n")"
+  log="${LOG_DIR}/agent-${n}.log"
+  cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>${label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${SBX_DIR}/sbx-agent-run.sh</string>
+        <string>${n}</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>ThrottleInterval</key><integer>30</integer>
+    <key>WorkingDirectory</key><string>${SBX_DIR}</string>
+    <!-- Pin TERM here too, so the job doesn't depend on the environment of
+         whoever ran sbx-start.sh. sbx-agent-run.sh also forces it. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TERM</key><string>xterm-256color</string>
+        <key>COLORTERM</key><string>truecolor</string>
+    </dict>
+    <key>StandardOutPath</key><string>${log}</string>
+    <key>StandardErrorPath</key><string>${log}</string>
+</dict>
+</plist>
+PLIST
+}
+
+print_status() {
+  printf '%-13s %-12s %s\n' "AGENT" "LAUNCHD" "PROCESS"
+  local n l
+  for n in "${AGENTS[@]}"; do
+    if is_loaded "$n"; then l="loaded"; else l="not loaded"; fi
+    printf '%-13s %-12s %s\n' "$(session_for "$n")" "$l" "$(agent_state "$n")"
+  done
+}

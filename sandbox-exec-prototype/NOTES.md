@@ -350,6 +350,97 @@ The filesystem boundary is the mitigation; the network is not. That is an
 accepted trade, and the right one given the intended use, but it should be an
 explicit trade rather than an assumed win.
 
+## Productionizing — fleet of 1 (`sbx-agent-1`)
+
+Self-contained under `sandbox-exec-prototype/`. **Nothing in the Apple
+Container fleet is read, written, or executed by any of this**, and every
+identifier is distinct so both can be loaded simultaneously:
+
+| | container fleet | this fleet |
+|---|---|---|
+| launchd label | `com.brianlow.claude-agent.N` | `com.brianlow.claude-sbx.N` |
+| plists | `../launchd/` | `./launchd/` |
+| logs | `~/.claude-agent/logs/` | `~/.claude-sbx/logs/` |
+| session name | `agent-N` | `sbx-agent-N` |
+| isolation | Linux container | sandbox-exec (Seatbelt) |
+
+```sh
+./sbx-start.sh    # bootstrap under launchd (idempotent)
+./sbx-status.sh   # launchd + process state
+./sbx-stop.sh     # bootout, then confirm the process is really gone
+```
+
+`profiles/06-production.sb.template` is revision 05 with the spike scaffolding
+removed — `~/dev` is now **fully denied**, including this repo — plus the fleet
+log dir and the python3 needed by the pty launcher. Paths are templated
+(`__HOME__`, `__VAULT__`, `__LOGDIR__`) and rendered to
+`generated/sbx-agent-N.sb` on every launch, so editing the generated file never
+silently persists. `sbx-agent-run.sh` compile-checks the profile before exec so
+a syntax error fails loudly instead of becoming a 30s KeepAlive spin.
+
+Verified: `verify.sh generated/sbx-agent-1.sb` → 16/16, and `~/dev/claude-agent`
+and the prototype dir are both denied now (they were allowed in rev 05).
+
+### Getting it to actually start under launchd — three failures
+
+Running under launchd is materially different from a terminal, and all three
+failures presented as *the same silent hang*: process alive, 0% CPU, a few MB
+RSS, no output, no debug file, and KeepAlive dutifully keeping the corpse
+warm. None produced an error message.
+
+1. **`script` exits on stdin EOF.** launchd attaches no stdin, so
+   `script -q /dev/null` hit EOF immediately (`^D` in the log) and died.
+2. **No `TERM`.** launchd provides none. Worse, `launchctl bootstrap` passes
+   the *calling* shell's environment into the job, so the value depends on who
+   ran `sbx-start.sh` — a caller with `TERM=dumb` leaks that in. Now forced
+   unconditionally in both `sbx-agent-run.sh` and the plist's
+   `EnvironmentVariables`, never `${TERM:-...}`.
+3. **The pty had no window size** — the actual root cause. `script` copies
+   winsize from its own stdin; with no terminal there, the pty came up
+   `0 rows; 0 columns` (confirmed via `stty -a -f /dev/ttysNNN`) and the TUI
+   hung on it.
+
+Fixed by replacing `script` with `pty-run.py`, which sets `TIOCSWINSZ`
+explicitly (120x40), never closes the child's stdin, forwards signals so
+`bootout` stops the agent cleanly, and drains the pty (necessary — an undrained
+pty eventually blocks the writer). It runs *inside* the sandbox, so it gets no
+privilege the agent doesn't already have.
+
+The container fleet hit none of these: `container run --tty` allocates a
+properly-sized pty, doesn't propagate EOF that way, and the image set `TERM`.
+
+`pty-run.py` is installed to `~/.claude-sbx/pty-run.py` on each launch, because
+the profile can no longer read `~/dev`. `/usr/bin/python3` is only a shim, so
+the profile also needs read+exec on
+`/Library/Developer/CommandLineTools`.
+
+**Confirmed working:** debug log written, `40 rows; 120 columns`,
+`Bridge URL: wss://bridge.claudeusercontent.com`,
+`[remote-bridge] v2 transport connected`, `state=connected`, and zero Seatbelt
+denials at runtime.
+
+### TCC prompt names the process by version number
+
+On first vault access macOS prompted for iCloud Drive access — titled with a
+bare version number rather than anything recognisable, because the binary is a
+*versioned file* (`~/.local/share/claude/versions/2.1.220`), so the process
+name is literally `2.1.220`.
+
+Two consequences worth planning around:
+
+- TCC grants are keyed to the binary path, so **every Claude Code update will
+  re-prompt** under a new version number. An unattended fleet will silently
+  lose vault access on update until someone clicks Allow. Pointing the fleet at
+  a stable wrapper path, or granting Full Disk Access, would avoid this — and
+  FDA is needed for Bear anyway.
+- The prompt is genuinely unidentifiable. Anyone who doesn't know why a bare
+  version number wants their iCloud Drive should reasonably deny it.
+
+Related, and harmless: the debug log shows `Claude in Chrome` failing to
+install native-messaging manifests into Chrome/Brave/Arc support dirs with
+`EPERM`. That's the profile working as intended — those directories aren't on
+the allow-list and a headless agent has no business writing to them.
+
 ### Still open
 
 Everything PLAN.md asked for is answered. What's left is productionizing,
