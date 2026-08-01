@@ -30,23 +30,28 @@ the real one.
 
 Three zones. Only two of them have a host path.
 
-**1. Local disk — `~/.hermes` (host) = `/opt/data` (container)**
+**1. Local disk — `hermes/data/` (host) = `/opt/data` (container)**
 
-Machine state. Not in iCloud, not in the vault, not in this repo. The image
-sets `HERMES_HOME=/opt/data`, so anything the docs describe as living in
-`~/.hermes` lands here.
+Machine state. In this repo but **gitignored** — the whole experiment is one
+directory rather than a dotfile spread across the laptop. The image sets
+`HERMES_HOME=/opt/data`, so anything the docs describe as living in `~/.hermes`
+lands here instead.
 
-| Host                           | Container                      | What                            |
-| ------------------------------ | ------------------------------ | ------------------------------- |
-| `~/.hermes/.env`               | `/opt/data/.env`               | secrets (chmod 600)             |
-| `~/.hermes/config.yaml`        | `/opt/data/config.yaml`        | the config from below           |
-| `~/.hermes/memories/MEMORY.md` | `/opt/data/memories/MEMORY.md` | agent notes, 2,200 cap          |
-| `~/.hermes/memories/USER.md`   | `/opt/data/memories/USER.md`   | user profile, 1,375 cap         |
-| `~/.hermes/state.db`           | `/opt/data/state.db`           | SQLite sessions + FTS           |
-| `~/.hermes/SOUL.md`            | `/opt/data/SOUL.md`            | personality; `HERMES_HOME` only |
-| `~/.hermes/skills/`, `logs/`   | `/opt/data/…`                  | machinery                       |
+| Host                              | Container                      | What                            |
+| --------------------------------- | ------------------------------ | ------------------------------- |
+| `hermes/data/.env`                | `/opt/data/.env`               | secrets (chmod 600)             |
+| `hermes/data/config.yaml`         | `/opt/data/config.yaml`        | the config from below           |
+| `hermes/data/memories/MEMORY.md`  | `/opt/data/memories/MEMORY.md` | agent notes, 2,200 cap          |
+| `hermes/data/memories/USER.md`    | `/opt/data/memories/USER.md`   | user profile, 1,375 cap         |
+| `hermes/data/state.db`            | `/opt/data/state.db`           | SQLite sessions + FTS           |
+| `hermes/data/SOUL.md`             | `/opt/data/SOUL.md`            | personality; `HERMES_HOME` only |
+| `hermes/data/skills/`, `logs/`    | `/opt/data/…`                  | machinery                       |
 
-A live SQLite file is why this stays off iCloud.
+Gitignored as `hermes/data/` — it holds a live SQLite file, secrets, and
+caches, none of which are source. That live SQLite file is also why this zone
+stays on local disk and out of iCloud. Nothing here is precious except `.env`
+and `config.yaml`; deleting the directory and re-running `setup` rebuilds the
+rest.
 
 **2. iCloud — `${VAULT}` (host) = `/vault` (container)**
 
@@ -56,10 +61,18 @@ Claude fleet uses.
 
 | Host                      | Container               | What                                |
 | ------------------------- | ----------------------- | ----------------------------------- |
-| `${VAULT}/HERMES.md`      | `/vault/HERMES.md`      | policy file — **new, you write it** |
+| `${VAULT}/.hermes.md`     | `/vault/.hermes.md`     | policy file — **new, you write it** |
 | `${VAULT}/CLAUDE.md`      | `/vault/CLAUDE.md`      | already there, also auto-loaded     |
 | `${VAULT}/Fleet Reset.md` | `/vault/Fleet Reset.md` | already there, the reset trigger    |
 | `${VAULT}/<your notes>`   | `/vault/<your notes>`   | everything the agent knows          |
+
+The auto-loaded context filenames are exactly `SOUL.md`, `.hermes.md`,
+`AGENTS.md`, `CLAUDE.md`, `.cursorrules` — there is no `HERMES.md`, which an
+earlier draft of this plan assumed. `.hermes.md` is the right slot anyway: it's
+Hermes-only (the Claude fleet ignores it) and, being a dotfile, Obsidian hides
+it so it never shows up as a note to curate. Note the vault's existing file is
+`AGENT.md`, singular, so it is *not* auto-loaded — it just points at
+`CLAUDE.md`, which is.
 
 **3. Inside the image — `/opt/hermes`**
 
@@ -73,27 +86,29 @@ is the store.
 Two things make the vault actually primary:
 
 1. **`--workdir /vault`** — context-file discovery is rooted at the working
-   directory, so a vault-root `HERMES.md` loads into every session.
-2. **A vault-root `HERMES.md`** saying: record findings as notes here, use
+   directory, so a vault-root `.hermes.md` loads into every session.
+2. **A vault-root `.hermes.md`** saying: record findings as notes here, use
    wikilinks, keep `MEMORY.md` to pointers. Without it the agent just fills
    `MEMORY.md` until it hits the cap. The vault's existing `CLAUDE.md` also gets
-   auto-loaded, so don't let the two contradict each other.
+   auto-loaded, so don't let the two contradict each other — the written
+   `.hermes.md` defers to `CLAUDE.md` outright and only adds the Hermes-specific
+   parts (pointer-index discipline, hands off `Fleet Reset.md`).
 
 ## Setup
 
 ```sh
-mkdir -p ~/.hermes && chmod 700 ~/.hermes
+mkdir -p hermes/data && chmod 700 hermes/data
 
 # one-time, needs a tty — the long-running container has none
 container run -it --rm \
-  --mount "source=${HOME}/.hermes,target=/opt/data" \
+  --mount "source=$(pwd)/hermes/data,target=/opt/data" \
   nousresearch/hermes-agent setup
 ```
 
 `hermes model` picks the provider/slug, `hermes gateway setup` walks through
 Discord — or skip both and write the two files below by hand.
 
-**`~/.hermes/.env`** (read by the image off `/opt/data`; no `--env` plumbing):
+**`hermes/data/.env`** (read by the image off `/opt/data`; no `--env` plumbing):
 
 ```
 OPENROUTER_API_KEY=sk-or-...
@@ -106,7 +121,12 @@ OBSIDIAN_VAULT_PATH=/vault
 `OBSIDIAN_VAULT_PATH` otherwise defaults to a path that doesn't exist in the
 container.
 
-**`~/.hermes/config.yaml`** — note `model:` is a mapping, not a slug string:
+**`hermes/data/config.yaml`** — note `model:` is a mapping, not a slug string.
+Hermes **rewrites this file on first start**: it migrates the schema, stamps the
+current `_config_version` (33 as of this writing — ignore the warning text that
+says to hand-set 12), backs the old one up as `config.yaml.bak-<ts>`, and drops
+any hand-written comments. So write it for correctness, not for posterity; your
+settings survive, your prose doesn't. `.env` is left alone.
 
 ```yaml
 model:
@@ -127,9 +147,12 @@ discord:
 ```
 
 **Discord app:** enable the **Message Content Intent** under Privileged Gateway
-Intents — without it the bot can't read messages at all and fails silently.
-Scopes `bot` + `applications.commands`; permissions View Channel, Send Messages,
-Send Messages in Threads, Read Message History, Add Reactions.
+Intents — without it the bot receives message events with empty text, and fails
+silently. Also enable **Server Members Intent** (resolving usernames);
+**Presence Intent** is optional. Scopes `bot` + `applications.commands`;
+permissions View Channels, Send Messages, Embed Links, Attach Files, Read
+Message History (permissions integer `117760` minimal / `274878286912`
+recommended).
 
 **Put a spend limit on the OpenRouter key.** Cost is the whole point of the
 experiment; use a dedicated key rather than one backed by the account balance.
@@ -137,15 +160,25 @@ experiment; use a dedicated key rather than one backed by the account balance.
 ## Run
 
 ```sh
+./hermes/hermes-run.sh     # start (idempotent — force-removes a stale hermes-1 first)
+./hermes/hermes-stop.sh    # tear down; state survives in hermes/data/
+container logs -f hermes-1
+```
+
+`hermes-run.sh` sources `common.sh` for `${VAULT}` and wraps:
+
+```sh
 container run -d \
   --name hermes-1 \
-  --mount "source=${HOME}/.hermes,target=/opt/data" \
+  --mount "source=${SCRIPT_DIR}/data,target=/opt/data" \
   --mount "source=${VAULT},target=/vault" \
   --workdir /vault \
-  nousresearch/hermes-agent gateway run
+  nousresearch/hermes-agent:latest gateway run
 ```
 
 - `gateway run` is the image's command (bare-metal CLI spells it `hermes gateway`).
+- Pull with `container image pull` — Apple Container has no `container images`
+  subcommand; the plural form errors with a confusing missing-plugin message.
 - No `--tty` (headless daemon), no `--rm` (keep it inspectable after a crash);
   `container rm -f hermes-1` before restarting, like `agent-run.sh` does.
 - Discord is an outbound WebSocket — no ports need publishing.
@@ -165,7 +198,13 @@ built-in tools are on.
 
 ## Check it works
 
-- [ ] `hermes doctor` clean
+- [x] `hermes doctor` clean — run it without the vault mount to skip the TCC
+      prompt: `container run --rm --mount "source=$(pwd)/hermes/data,target=/opt/data"
+      nousresearch/hermes-agent:latest doctor`. Exit 0; the only issues are a
+      `~/.local/bin/hermes` symlink and optional API keys (`EXA_API_KEY`,
+      `XAI_API_KEY`, …) for tools we're not using. Note its "✓ OpenRouter API"
+      passed while the key was still `REPLACE_ME`, so that check does not prove
+      the key is valid — the Discord round-trip below is the real test.
 - [ ] Bot answers an @mention from you, ignores a different account
 - [ ] Send an image — confirm it routes to the vision aux, doesn't fail silently
 - [ ] Tell it a durable fact → lands as a vault note, not buried in `MEMORY.md`.
@@ -186,9 +225,15 @@ built-in tools are on.
 
 ## Open questions
 
-- Which vault folders Hermes should author into — needed to write `HERMES.md`
+- ~~Which vault folders Hermes should author into~~ — **decided: the whole
+  vault, same terms as the Claude fleet.** No `hermes/` sandbox folder; it files
+  by topic and keeps the `CLAUDE.md` index current. Blast radius is the reason
+  to watch the first few notes it writes.
 - Does `auxiliary.vision` actually take over for a text-only primary? (An
   earlier draft claimed a known upstream bug; that was unsourced. Just test it.)
+- The $0.0896/$0.1792 per 1M quoted on OpenRouter is a 36%-off promo on V4
+  Flash, not the standing rate. Re-check before treating the cost estimate as
+  durable.
 - Whether a 2,200-char pointer index is enough, or it needs a hub note in the
   vault that `MEMORY.md` points at
 
