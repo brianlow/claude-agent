@@ -689,12 +689,23 @@ was denied all along. Both operations are now asserted separately in
   `DevToolsActivePort`. What is lost is Chromium's internal renderer/browser
   split, not our boundary — every process in the tree is still confined by the
   profile, which is the stronger of the two.
-- **GPU grants are worth it for stealth.** With `--disable-gpu` and no IOKit
-  access, sannysoft reports `WebGL Vendor: Canvas has no webgl context` — and
-  "no WebGL" is itself a fingerprint tell, which would defeat the point. With
-  `IOSurfaceRootUserClient` / `AGXDeviceUserClient` / `IOAccel*` granted it
-  reports `ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro)`. GPU access is a
-  rendering capability, not a data one.
+- **WebGL must WORK; the GPU need not be real.** With `--disable-gpu` and no
+  IOKit access, sannysoft reports `WebGL Vendor: Canvas has no webgl context`,
+  and "no WebGL at all" is itself a fingerprint tell. Granting
+  `IOSurfaceRootUserClient` / `AGXDeviceUserClient` / `IOAccel*` fixes it:
+  `ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro)`.
+
+  **Correction to the first reading of this.** That renderer string is not
+  evidence the grants are what make it realistic — CloakBrowser *spoofs* it.
+  Forced onto software rendering with `--use-angle=swiftshader`, on the same
+  machine, it reports `ANGLE (Apple, ANGLE Metal Renderer: Apple M2 Max)`.
+  This host is an M1 Pro (`system_profiler`), so that string is fabricated, and
+  no SwiftShader/llvmpipe tell leaks through.
+
+  The requirement is therefore *a working GL context*, not hardware
+  acceleration. That matters well beyond this profile: it means a GPU-less
+  environment — a VM or container — does not automatically lose the WebGL
+  fingerprint, which is the opposite of what the first reading implied.
 - **The code-sign clone needs `file-link`, not just `file-write*`.** Modern
   Chromium `clonefile()`s its own bundle into
   `/private/var/folders/.../org.chromium.Chromium.code_sign_clone/`;
