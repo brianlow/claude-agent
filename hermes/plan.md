@@ -206,11 +206,18 @@ container logs -f hermes-1
 ```sh
 container run -d \
   --name hermes-1 \
+  --env PYTHONPATH=/opt/data/lazy-packages \
+  --env AGENT_BROWSER_EXECUTABLE_PATH=/opt/data/.local/bin/chromium-shim \
   --mount "source=${SCRIPT_DIR}/data,target=/opt/data" \
   --mount "source=${VAULT},target=/vault" \
   --workdir /vault \
   nousresearch/hermes-agent:latest gateway run
 ```
+
+It also writes two shims into `data/.local/bin/` first (idempotent, so deleting
+`hermes/data/` rebuilds them): `uv`, which makes tool installs permanent, and
+`chromium-shim`, which lets agent-browser find the browser. Both are explained
+in Gotchas — neither is optional, and the failure each prevents is silent.
 
 - `gateway run` is the image's command (bare-metal CLI spells it `hermes gateway`).
 - Pull with `container image pull` — Apple Container has no `container images`
@@ -287,6 +294,55 @@ Hermes with `hermes-run.sh`.
 needs `hermes-stop.sh && hermes-run.sh` to take effect — editing the file alone
 does nothing to the running gateway.
 
+**The browser toolset advertises itself but can never launch — and the error you
+see is a lie.** Every `browser_*` call died on a 30–60s timeout ("the browser
+daemon may still be starting, or Chromium may be missing system libraries").
+All three implied causes are wrong. The image bakes in 344MB of working Chromium
+(`Chromium 151`, no missing libs, runs fine). The real error only appears if you
+run the CLI by hand — `agent-browser open https://example.com` → *"Chrome not
+found"*. It's a path-layout mismatch:
+
+```
+agent-browser searches for   chromium-<rev>/chrome-linux64/chrome
+the image ships              chromium_headless_shell-<rev>/chrome-linux/headless_shell
+```
+
+agent-browser *does* read `PLAYWRIGHT_BROWSERS_PATH`, but only recognises the
+full-Chrome layout. What makes it genuinely confusing is that
+`tools/browser_tool.py::_chromium_installed()` accepts **either** name, so the
+capability check returns True and Hermes keeps advertising a toolset that cannot
+work — the model then retries forever against a daemon that never started. Fixed
+with `AGENT_BROWSER_EXECUTABLE_PATH`, which agent-browser and `_chromium_installed`
+both read, so it repairs the launch *and* makes the check honest. It points at
+`chromium-shim` rather than the binary because the `-1234` revision changes on
+image updates; a hardcoded path would silently re-break on the next
+`container image pull`. Headless-shell speaks CDP and drives agent-browser fine.
+
+**`hermes tools post-setup <key>` installs do NOT survive a restart.** The
+container is disposable (`container rm -f` on every start) and only `/opt/data`
+is a mount, so anything written into `/opt/hermes` is thrown away. Hermes has a
+durable target — `HERMES_LAZY_INSTALL_TARGET=/opt/data/lazy-packages`, appended
+to `sys.path` by `hermes_bootstrap.py` — but **only lazy runtime imports land
+there**. The explicit post-setup hooks call `_pip_install`, which shells out to
+`uv pip install` and writes into `/opt/hermes/.venv`. There's no env-var
+redirect: uv 0.11.6 has no `UV_TARGET`, and `_pip_install` pins `VIRTUAL_ENV`
+from `sys.executable`. The seam is `PATH` — the image puts `/opt/data/.local/bin`
+*ahead* of `/usr/local/bin`, and `_pip_install` resolves uv via `shutil.which()`,
+so a shim there wins. `hermes-run.sh` writes it on every start.
+
+Two halves are needed, and skipping the second is a silent trap: the package
+installs correctly and then fails at runtime with `ModuleNotFoundError`, because
+some tools do their work in a **subprocess** — `plugins/web/ddgs/provider.py`
+builds the child's env from the inherited `PYTHONPATH` only, so the parent's
+in-process `sys.path` never reaches it. Hence `--env PYTHONPATH=/opt/data/lazy-packages`.
+Caveat: `--target` can't see the venv's packages, so deps get re-downloaded
+(~34MB for ddgs). That's inert weight, not a shadowing risk — the target is
+*appended* to `sys.path`, so the venv's copies still win at import.
+
+npm-based hooks (`agent_browser`, `camofox`) still write to
+`/opt/hermes/node_modules` and remain ephemeral. Moot for agent-browser, which
+is baked into the image along with Chromium.
+
 ## Check it works
 
 - [x] `hermes doctor` clean — run it without the vault mount to skip the TCC
@@ -303,9 +359,19 @@ does nothing to the running gateway.
       description of a photo. Only after adding the Slack `files:read` scope;
       without it the attachment fetch fails.
 - [x] Vault *writes* work through `patch` (blocked until `HERMES_WRITE_SAFE_ROOT`
-      was emptied — see Gotchas). Still untested: whether a *durable fact* lands
-      as a topic note vs. getting buried in `MEMORY.md` — the test that proves
-      the vault is primary. If it fails, make `.hermes.md` more explicit.
+      was emptied — see Gotchas).
+- [x] **A durable fact lands as a topic note, not in `MEMORY.md`** — the test
+      that proves the vault is primary. Told it one fact about a shrub; it wrote
+      `garden/plants/Potentilla.md` (care, hardiness, a flowering-log table) and
+      updated the `garden/Garden.md` hub in three places with wikilinks.
+      `MEMORY.md` stayed at 147 chars. The pointer-index discipline in
+      `.hermes.md` works as written — no need to make it more explicit.
+      Two blemishes: it invents `![[photo.jpg]]` embeds for images that don't
+      exist, and links `[[potentilla]]` lowercase against a `Potentilla.md` file
+      (fine on case-insensitive macOS, would break elsewhere).
+- [x] `web_search` works with no API key — `hermes tools post-setup ddgs` plus
+      the two Gotchas below. This is the built-in alternative to the browser
+      toolset: plain HTTP, 34MB, no Chromium.
 - [ ] Read a note just created on the phone — catches iCloud placeholders that
       the container can't fault in
 - [x] Restart the container, sessions survive — auto-resumed across several
