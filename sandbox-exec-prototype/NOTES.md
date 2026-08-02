@@ -350,7 +350,7 @@ The filesystem boundary is the mitigation; the network is not. That is an
 accepted trade, and the right one given the intended use, but it should be an
 explicit trade rather than an assumed win.
 
-## Productionizing — fleet of 1 (`sbx-agent-1`)
+## Productionizing — fleet of 5 (`sbx-agent-1`..`sbx-agent-5`) + one browser
 
 Self-contained under `sandbox-exec-prototype/`. **Nothing in the Apple
 Container fleet is read, written, or executed by any of this**, and every
@@ -1292,3 +1292,135 @@ tried and the file was not touched.
 Restated per this task's scope: these are synthetic-suite scores, which
 measure the fingerprint, not whether a real retailer serves a logged-in
 session a product page. That is Task 8's job, and a human's.
+
+## Isolating the agents' browsing — tested 2026-08-02, at `AGENTS=(1 2 3 4 5)`
+
+Scaling to five agents put five clients on one Chromium. This section records
+what was measured against the live `sbx-browser`, because the obvious answer
+turns out to be the wrong one.
+
+### What breaks today
+
+All five agents run as the same UID with the same `HOME`, and
+`sbx-agent-run.sh` installs one identical `agent-browser` config for all of
+them (`{"cdp":"9222"}`) with no `AGENT_BROWSER_SESSION`. So they share the
+default session, which means one `agent-browser` daemon, one socket under
+`~/.agent-browser/`, one ref namespace, and one page. That is a collision
+before CDP is even reached.
+
+### `--session` alone does NOT fix it
+
+`agent-browser`'s own docs say each `--session <name>` is "an isolated browser
+with its own cookies, tabs, and refs". That holds when agent-browser *launches*
+the browser. It does not hold when sessions `connect` to an existing endpoint —
+measured:
+
+```
+session sbxA: connect 9222; open https://example.com
+session sbxB: connect 9222; open https://example.org
+  → /json/list still shows 2 page targets — no new target was created
+  → sbxA `get url` now reports example.org      ← B navigated A's page
+```
+
+Two daemons were created (`sbxA.sock`, `sbxB.sock` — session isolation is real
+at the *daemon* level) but both attached to the same existing page target.
+
+### Per-agent tabs in one Chromium — TESTED, DOES NOT WORK
+
+The natural next idea, and the one an earlier draft of PLAN.md item 4
+recommended. `agent-browser tab new --label <name>` exists, ids are documented
+as stable, and labels are per-session client state (confirmed: sbxA labelled
+`t2` as `a` while sbxB labelled `t3` as `b`, each seeing only its own label).
+
+Explicit pinning does hold against a *quiet* neighbour:
+
+```
+sbxA: tab a          → sbxA sees example.com, sbxB still sees iana.org   ✅
+```
+
+But it does not survive a neighbour *creating* a tab:
+
+```
+sbxA pinned to its own labelled tab `a`  → example.com
+sbxB: tab new --label b2 https://example.net
+sbxA `get url`                           → about:blank                   ❌
+```
+
+A pinned session's current tab follows the browser's newest target. Every
+session also sees every other session's tabs in `tab list` — the list is the
+shared browser's target list, not a per-session view. So one agent opening a
+tab silently relocates every other agent, and the victim gets no error: it goes
+on issuing clicks and snapshots against a page it does not think it is on.
+**That is the disqualifying property** — not the contention, the silence.
+
+### Per-agent Chromium via the seed multiplexer — TESTED, WORKS
+
+`cloakserve` on 9222 is a multiplexer keyed on fingerprint seed, not a plain
+CDP proxy. `GET /` returns its process table, and requesting an unseen seed
+spawns a whole separate Chromium:
+
+```
+curl 'http://127.0.0.1:9222/json/version?fingerprint=99999'
+  → "webSocketDebuggerUrl": "ws://127.0.0.1:9222/fingerprint/99999/devtools/browser/<uuid>"
+curl 'http://127.0.0.1:9222/'
+  → active: 2, processes: {"41337": {pid 17, port 5100}, "99999": {pid 191, port 5101}}
+```
+
+Each seed gets its own `--user-data-dir=/profile/<seed>`, so separate cookies
+and separate device identity, and the ws URL is namespaced by seed so the
+multiplexer routes correctly. Binding a session to one is clean:
+
+```
+agent-browser --session sbxC connect "ws://127.0.0.1:9222/fingerprint/99999/devtools/browser/<uuid>"
+  → sbxC `tab list` shows ONLY its own tab; sbxA and sbxC never disturb each other  ✅
+```
+
+This all happens inside the one container, so the boundary is unchanged: still
+one image, one mount, one loopback publish.
+
+### The config file cannot express it
+
+Tested — none of these route to a per-seed browser. All three landed on the
+default seed's Chromium (4 tabs at the time), and no new seed was spawned:
+
+```
+{"cdp":"http://127.0.0.1:9222/fingerprint/77777"}                 → default browser
+{"cdp":"http://127.0.0.1:9222/json/version?fingerprint=77777"}    → default browser
+{"cdp":"9222"}                                                    → default browser
+```
+
+So the binding cannot be declared in `agent-browser-config.json`. It has to be
+an explicit `agent-browser --session <name> connect "<ws url>"` performed
+before `claude` starts — and since the browser UUID is regenerated on every
+Chromium start, the URL must be resolved at runtime, not baked into a file.
+
+### What building it would involve
+
+1. `AGENT_BROWSER_SESSION=sbx-agent-N` exported in `sbx-agent-run.sh`, so each
+   agent gets its own daemon, socket and refs. Necessary, not sufficient.
+2. A seed per agent (e.g. `BROWSER_FINGERPRINT` as a base, `+ N`). No change to
+   `sbx-browser-run.sh` is needed for the spawning itself — extra Chromiums are
+   created lazily on first request for an unseen seed.
+3. A resolve-and-connect step in `sbx-agent-run.sh` before `exec`: curl
+   `/json/version?fingerprint=<seed>`, take `webSocketDebuggerUrl`, `connect`
+   it. This is the only genuinely new machinery.
+4. **Reconnect on browser restart** — the hard part, and the reason this is not
+   a 20-line change. `KeepAlive` recycles the browser container independently
+   of the agents; every UUID changes and all five bindings go stale, while the
+   agent processes keep running and never learn. Needs either a re-resolve
+   before each use or a watcher — decide before building, because the failure
+   is silent in the same way the tab failure is.
+5. Raise `--memory 4g` / `--cpus 2` on the container: that is sized for one
+   Chromium, and this makes it five.
+6. `verify-browser.sh` gains an assertion that each agent's session is bound to
+   its own seed, since nothing else would catch a silent fallback to the shared
+   default browser.
+
+### Two decisions that are Brian's, not engineering
+
+- **Five device identities behind one IP.** Per-seed isolation means the fleet
+  stops looking like one person on one device. Whether that is better or worse
+  depends on what the browsing is for; it is not self-evidently an improvement.
+- **Licensing.** Recorded earlier in this file: the free binary advertises "1
+  concurrent session" as a Pro upsell and does not enforce it locally. One
+  Chromium per agent is deliberately five concurrent sessions.

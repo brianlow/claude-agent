@@ -19,7 +19,11 @@
 
 SBX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-AGENTS=(1)                                   # fleet of 1 for now
+# Five agents, one browser — matching the Apple Container fleet this replaced.
+# Every agent gets an identical rendered profile (render_profile takes N but the
+# template has no per-agent paths) and the same cwd, the vault. That sharing is
+# inherited from the container fleet, not new here.
+AGENTS=(1 2 3 4 5)
 LABEL_PREFIX="com.brianlow.claude-sbx"
 LOG_DIR="${HOME}/.claude-sbx/logs"
 PLIST_DIR="${SBX_DIR}/launchd"
@@ -135,7 +139,12 @@ is_loaded()       { is_loaded_label "$(label_for "$1")"; }
 
 # Is the agent's claude process actually alive? There's no container to query,
 # so match the remote-control session name on the command line.
-agent_pid() { pgrep -f -- "--remote-control $(session_for "$1")" 2>/dev/null | head -1; }
+#
+# The trailing ( |$) is not decoration: pgrep -f takes an extended regex and
+# matches a substring, so a bare "sbx-agent-1" also matches sbx-agent-10's
+# command line. Harmless at AGENTS=(1..5), silently wrong the day the fleet
+# grows past 9 — and the symptom would be "agent 1 looks up when it isn't".
+agent_pid() { pgrep -f -- "--remote-control $(session_for "$1")( |\$)" 2>/dev/null | head -1; }
 
 agent_state() {
   local pid; pid="$(agent_pid "$1")"

@@ -1,13 +1,13 @@
 # Sandbox-exec prototype
 
-> ## STATUS — 2026-08-01: spike complete, fleet of 1 running
+> ## STATUS — 2026-08-02: spike complete, fleet of 5 + 1 browser running
 >
 > | | |
 > |---|---|
 > | Phase 0 (does it pair at all) | **done** — passed first try |
 > | Phase 1 (tighten the profile) | **done** — 6 revisions, `verify.sh` fail=0 |
 > | Phase 2 (network) | **descoped by decision** — full internet is wanted |
-> | Productionizing (launchd) | **done for a fleet of 1** (`sbx-agent-1`) |
+> | Productionizing (launchd) | **done — `sbx-agent-1`..`5` + one browser** |
 >
 > Success criteria 1–3 met, 4 descoped. Both original open questions answered:
 > the Remote Control block **was** platform-based, and `sandbox-exec` **does**
@@ -258,11 +258,13 @@ name in that list should trace to an observed denial *and* a reason.
 
 **Read `NOTES.md` first** — it carries the findings and the full open list.
 
-Current state: `sbx-agent-1` runs under launchd, sandboxed, cwd = the vault,
-paired to Fleet — **plus a second launchd job, `com.brianlow.claude-sbx.browser`,
-running the browser as an Apple `container`** (`cloakhq/cloakbrowser:0.5.3`),
-which the agent reaches only over CDP on `127.0.0.1:9222`. `./sbx-status.sh`
-to check both, `./sbx-start.sh` / `./sbx-stop.sh` to control. The Apple
+Current state: `sbx-agent-1`..`sbx-agent-5` run under launchd, each sandboxed,
+each cwd = the vault, all five paired to Fleet — **plus a sixth launchd job,
+`com.brianlow.claude-sbx.browser`, running the browser as an Apple `container`**
+(`cloakhq/cloakbrowser:0.5.3`), which every agent reaches only over CDP on
+`127.0.0.1:9222`. One browser serves all five; see item 4 below for what that
+shares. `./sbx-status.sh`
+to check all of them, `./sbx-start.sh` / `./sbx-stop.sh` to control. The Apple
 Container *fleet* (the agent-side container world this prototype replaced) is
 untouched and not running — the browser container is unrelated to that and is
 the current, live arrangement.
@@ -313,9 +315,31 @@ Ready to build:
    directly, but `claude → @playwright/mcp → browser` has never been driven
    from inside a live session. Lower priority now that the containerized
    browser path works end to end (see NOTES.md, "Browser in a container").
-4. **Scale past one agent.** `AGENTS=(1)` in `fleet-common.sh`. Worth thinking
-   about whether N agents sharing one vault cwd is actually wanted — note the
-   container fleet had the same property, so this isn't a regression.
+4. ~~**Scale past one agent.**~~ **Done 2026-08-02** — `AGENTS=(1 2 3 4 5)`.
+   All five paired to the bridge with zero rejections; the five rendered
+   profiles are byte-identical (`render_profile` takes `N` but the template has
+   no per-agent substitution). Two shared resources came with it, both
+   deliberate, neither new:
+   - **One vault cwd for all five**, as flagged here originally. The container
+     fleet had the same property, so it isn't a regression.
+   - **One browser for all five.** The fleet runs a single `sbx-browser`
+     container on a single fingerprint seed, and every agent's `agent-browser`
+     points at the same CDP port — so five agents share one Chromium, one
+     device identity, and one set of tabs. They will interleave navigations on
+     each other. Worse than interleaving, in fact — see "Isolating the agents'
+     browsing" in NOTES.md, which records the live test: they silently steal
+     each other's *current page*, so an agent can issue commands against
+     another agent's page and never see an error.
+
+     An earlier draft of this bullet proposed per-agent CDP **targets** (tabs)
+     within the one Chromium as the fix. **That was tested and it does not
+     work** — `agent-browser`'s notion of the current tab follows the browser's
+     newest target, so any agent opening a tab yanks every other agent's
+     context, even one explicitly pinned to a labelled tab. The mechanism that
+     does work is cloakserve's per-seed multiplexer: one Chromium **per agent**
+     inside the one container. Not built — it needs a decision on cost and on
+     whether five distinct device identities behind one IP is wanted. Full
+     write-up in NOTES.md.
 5. **Reset watcher.** Deliberately not built: the existing one is wired to the
    old `reset-agents.sh`, and two watchers on the same sentinel would fight.
    Needs its own sentinel and its own reset script if wanted.

@@ -244,7 +244,10 @@ echo "--- a wedged browser must mean 'no browser', not 'an unconfined browser'"
 # agent-browser auto-launches /Applications/Google Chrome when no CDP port
 # answers. The AGENT's profile denies that exec — assert it still does, without
 # stopping the browser.
-AGENT_PROFILE="${GEN_DIR}/sbx-agent-1.sb"
+# Any agent's profile will do — render_profile has no per-agent substitutions,
+# so all of them are byte-identical. Take the first rather than hardcoding
+# agent 1, which stops being guaranteed to exist the moment AGENTS changes.
+AGENT_PROFILE="$(profile_for "${AGENTS[0]}")"
 CHROME_BIN="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 if [ ! -f "${AGENT_PROFILE}" ]; then
   printf '  \033[33mn/a\033[0m   %s not rendered — run ./sbx-start.sh first\n' "${AGENT_PROFILE}"
