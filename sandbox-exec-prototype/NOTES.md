@@ -1080,3 +1080,86 @@ same as before the spike started) — nothing about this spike touched it.
   against a real target site relevant to this project — `cloaktest`'s battery
   is generic bot-detection demo sites, not validated against anything
   project-specific.
+
+## Task 4 verification — launchd/container evidence, and the persistence fallback re-tested
+
+### KeepAlive self-healing: CONFIRMED
+
+`container rm -f sbx-browser` while the `com.brianlow.claude-sbx.browser` job
+was loaded, then polled `container ls` / `curl .../json/version`: the
+container reappeared on its own (`sbx-browser` back in `container ls` within
+seconds, `STARTED` timestamp updated) with no `launchctl` call of any kind.
+`./sbx-status.sh` afterward showed `browser  loaded  running (container, CDP
+9222 ok)` and `./verify-browser.sh` passed 11/11. This is the property that
+made the native (`sandbox-exec`) browser job self-healing, and it survived the
+substrate change to a container intact — launchd's `KeepAlive` on the
+`container run` foreground process is sufficient; no wrapper logic was needed.
+
+### Q2 re-tested with the brief's fallback flag: STILL NO — the design goal is not met, and this is a deliberate, documented gap
+
+The committed `sbx-browser-run.sh` does **not** carry `--user-data-dir`. Confirmed empirically why not, by testing it directly rather than assuming:
+
+1. **Baseline (committed form)** — set `document.cookie='sbxprobe=1'` via
+   `agent-browser eval` against `https://example.com`, confirmed the readback,
+   then `container rm -f sbx-browser` and waited for launchd to bring it back.
+   Reconnected, reloaded `https://example.com`, read `document.cookie` back:
+   `""`. Cookie lost, matching Phase 0 exactly.
+
+2. **Fallback** — temporarily edited the `cloakserve` line to add
+   ` --user-data-dir=/profile/chrome` (extra args are forwarded to the
+   browser per the brief), restarted the container the same way, repeated the
+   cookie probe (`sbxprobe=2`), confirmed the readback, restarted again,
+   reconnected: `document.cookie` → `""` again. Fallback does not persist
+   cookies either.
+
+3. **Root cause found, not just observed**: after the fallback run, `find
+   sandbox-exec-prototype/browser-profile -maxdepth 2` showed only the
+   fingerprint-keyed `41337/` directory — **no `chrome/` subdirectory was ever
+   created**. `--user-data-dir=/profile/chrome` was silently ignored;
+   `cloakserve` does not forward it to the underlying Chromium the way the
+   brief's contingency assumed (or intercepts/overrides it before Chromium
+   sees it). This isn't a timing or shutdown-signal problem — the flag simply
+   had no observable effect on where the profile is written.
+
+**Reverted the edit; `sbx-browser-run.sh` is byte-for-byte the committed
+version** (`git diff` clean after revert). No code change was justified by
+this experiment.
+
+**Stated plainly, because this is a stated design goal and not just an
+implementation detail**: the browser profile is ephemeral across container
+restarts under both forms tested. Fingerprint pinning (`--fingerprint`)
+persists correctly (per Phase 0's Q3, unaffected by this task); cookies,
+localStorage, and any other login/session state do not survive a restart.
+Anything that depends on staying logged in across a browser-job restart will
+silently log out. Neither `--data-dir` nor Chromium's own
+`--user-data-dir` (as passed through `cloakserve`) solves this with the
+current image (`cloakhq/cloakbrowser:0.5.3`); a real fix would need either a
+`cloakserve` flag/behavior this image doesn't expose, or reading its source to
+find the actual profile-write path and mounting *that* path directly — not
+attempted here, out of scope for Task 4's verification pass.
+
+### Self-update suppression: CONFIRMED
+
+Across all restarts performed during this verification (several, in quick
+succession), `~/.claude-sbx/logs/browser.log` never showed a GitHub fetch or
+any large download — no lines resembling a Chromium binary pull, only the
+`cloakserve` banner, `CDP multiplexer starting`, `Launching Chrome`, and
+`Chrome ready`. `curl http://127.0.0.1:9222/json/version` after a fresh
+restart reported `Chrome/146.0.7680.177`, matching the banner's own "Running
+the free binary (v146)" line and **not** the "latest binary (v150)" the
+banner separately advertises — confirming `CLOAKBROWSER_AUTO_UPDATE=false` is
+holding the image's shipped binary rather than the image silently drifting
+to whatever the free binary would otherwise fetch.
+
+Time from container start to `Chrome ready` was **not consistent**: a cold
+start (fleet otherwise idle) reached `Chrome ready` in ~11s, but several
+restarts performed back-to-back in this session (as fast as `container rm -f`
++ launchd relaunch allows, roughly every 1-2 minutes) took 60-115s, all spent
+between the `Openbox-Message` log line and `Launching Chrome` with **no log
+output at all** in between — not a download signature (no repeated lines, no
+network-error lines), more consistent with I/O or profile-recovery cost from
+back-to-back ungraceful (`SIGKILL`-via-`rm -f`) restarts against the same
+bind-mounted profile directory. Not root-caused further here; worth knowing
+if `KeepAlive` ever has to cycle this job repeatedly in a short window in
+production, since a 100s+ gap before `Chrome ready` is a long way from
+"self-healing in seconds."
