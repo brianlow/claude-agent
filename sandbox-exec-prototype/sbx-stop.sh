@@ -35,15 +35,17 @@ if is_loaded_label "$(browser_label)"; then
   echo "browser: booting out..."
   launchctl bootout "${GUI_DOMAIN}/$(browser_label)" \
     || echo "browser: WARNING — bootout failed."
-  for _ in 1 2 3 4 5; do
-    [ -z "$(browser_pid)" ] && break
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    browser_container_present || break
     sleep 1
   done
-  # Chromium is multi-process; bootout kills the job's own process, and the
-  # profile's (allow signal (target children)) lets it take its renderers with
-  # it. Confirm rather than assume — a leaked renderer holds the CDP port.
-  bpid="$(browser_pid)" || true
-  [ -n "$bpid" ] && { echo "browser: still running — sending TERM to $bpid"; kill "$bpid" 2>/dev/null || true; }
+  # `container run --rm` removes the container when it stops, but bootout kills
+  # the CLI process rather than the container — confirm rather than assume, or
+  # the next start finds the name taken and the port held.
+  if browser_container_present; then
+    echo "browser: container still present after bootout — removing"
+    container rm -f "${BROWSER_CONTAINER}" >/dev/null 2>&1 || true
+  fi
 else
   echo "browser: not loaded."
 fi

@@ -10,10 +10,10 @@ source "${SCRIPT_DIR}/fleet-common.sh"
 
 mkdir -p "${PLIST_DIR}" "${LOG_DIR}" "${GEN_DIR}" "${BROWSER_DATA_DIR}"
 
-# Browser first: it's what the agents talk to, and it takes a few seconds to
-# come up. Skipped without complaint if CloakBrowser isn't installed — the
-# agents are perfectly useful without it.
-if [ -n "$(cloak_bin)" ]; then
+# Browser first: it's what the agents talk to, and the image takes a few
+# seconds to come up. A missing container runtime is not fatal — the agents are
+# useful without a browser.
+if command -v container >/dev/null 2>&1; then
   render_browser_plist > "$(browser_plist)"
   if is_loaded_label "$(browser_label)"; then
     echo "browser: already loaded — leaving running."
@@ -23,8 +23,8 @@ if [ -n "$(cloak_bin)" ]; then
       || echo "browser: WARNING — bootstrap failed (see ${LOG_DIR}/browser.log)."
   fi
 else
-  echo "browser: CloakBrowser not installed — skipping."
-  echo "         to enable: npm install -g cloakbrowser && cloakbrowser install"
+  echo "browser: Apple container CLI not found — skipping."
+  echo "         to enable: install https://github.com/apple/container"
 fi
 
 for n in "${AGENTS[@]}"; do

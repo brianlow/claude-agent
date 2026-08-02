@@ -1,78 +1,83 @@
 #!/usr/bin/env bash
-# sbx-browser-run.sh — CloakBrowser under its own Seatbelt profile, foreground,
-# launchd-managed. One process, no pty (unlike the agent, this has no TUI).
+# sbx-browser-run.sh — CloakBrowser in an Apple container, foreground,
+# launchd-managed. One `container run`, no pty (unlike the agent, no TUI).
 #
-# WHY THIS IS A SEPARATE JOB
+# WHY A CONTAINER AND NOT A SANDBOX
 #
-# CloakBrowser cannot run inside the agent's sandbox. It aborts at startup:
+# This job used to be `sandbox-exec -f profiles/07-browser.sb ... Chromium.app`.
+# CloakBrowser cannot run in the AGENT's profile — it abort()s in
+# TransformProcessType without LaunchServices and SIGSEGVs in -[NSWindow _close]
+# without WindowServer, which are exactly the grants revisions 04 and 05 removed
+# to close the `open -a` confused-deputy escape.
 #
-#   abort() called / HIServices ___RegisterApplication_block_invoke
-#                  / HIServices TransformProcessType
+# Giving those grants to a second Seatbelt profile MOVED that escape instead of
+# deleting it. A Linux container has neither service to grant, so the capability
+# is gone. That is the entire point of this job's existence in this form.
 #
-# TransformProcessType is a LaunchServices call, and LaunchServices is the
-# mach-lookup revision 04 deliberately REMOVED to close the `open -a` confused-
-# deputy escape. Granting it back gets further and then SIGSEGVs in
-# -[NSWindow _close] unless WindowServer is granted too. Playwright's
-# headless_shell tolerated both denials; the full Chromium.app does not, and
-# CloakBrowser ships only the full bundle — the C++ fingerprint patches ARE the
-# browser, so there is no headless-shell variant to fall back to.
-#
-# Rather than widen the agent's profile to fit the browser (which would undo
-# most of what verify.sh proves), the two capability sets live in two sandboxes:
-#
-#   agent   — vault, Bear, Keychain, gcalcli.  NO GUI, NO LaunchServices.
-#   browser — GUI, LaunchServices.             NO secrets at all.
-#
-# THE AGENT DOES NOT LAUNCH THIS. That is a security property, not an
-# accident of packaging: launchd owns this command line, so a hostile session
-# operator cannot add --allow-file-access (which would let pages read local
-# files), repoint --user-data-dir, or load an extension. The agent's only reach
-# is CDP on loopback, and CDP has no verb that spawns a process.
+# THE AGENT DOES NOT LAUNCH THIS, and that is a security property rather than a
+# packaging accident: launchd owns this command line, so a hostile session
+# operator cannot add --allow-file-access, repoint --data-dir, add a --mount, or
+# load an extension. The agent's only reach is CDP on loopback, and CDP has no
+# verb that spawns a process.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/fleet-common.sh"
 
-mkdir -p "${LOG_DIR}" "${GEN_DIR}" "${BROWSER_DATA_DIR}"
+mkdir -p "${LOG_DIR}" "${BROWSER_DATA_DIR}"
 
-CB="$(cloak_bin)"
-[ -n "${CB}" ] && [ -x "${CB}" ] || {
-  echo "CloakBrowser not installed. Run (unsandboxed, on the host):" >&2
-  echo "  npm install -g cloakbrowser && cloakbrowser install" >&2
-  exit 1
-}
+# The container system may still be coming up (e.g. just after login), and
+# launchd will have started this job before anyone ran a container command.
+container system status &>/dev/null || container system start
 
-render_browser_profile > "${BROWSER_PROFILE}"
+# Clean slot: drop any stale/stopped/running container with this name, so a
+# reboot or a crashed job never wedges the name. Same reason ../agent-run.sh
+# does it.
+container rm -f "${BROWSER_CONTAINER}" &>/dev/null || true
 
-# Compile-check before exec. A syntax error otherwise becomes a silent 30s
-# KeepAlive spin rather than a visible failure — the same trap the agent job
-# hit during productionizing.
-sandbox-exec -f "${BROWSER_PROFILE}" /usr/bin/true 2>/dev/null || {
-  echo "browser profile failed to compile: ${BROWSER_PROFILE}" >&2
-  sandbox-exec -f "${BROWSER_PROFILE}" /usr/bin/true || true
-  exit 1
-}
+echo "$(date '+%Y-%m-%dT%H:%M:%S') starting browser container"
+echo "  image     : ${BROWSER_IMAGE}"
+echo "  container : ${BROWSER_CONTAINER}"
+echo "  profile   : ${BROWSER_DATA_DIR}"
+echo "  cdp       : 127.0.0.1:${BROWSER_CDP_PORT}"
+echo "  seed      : ${BROWSER_FINGERPRINT}"
 
-echo "$(date '+%Y-%m-%dT%H:%M:%S') starting browser"
-echo "  profile : ${BROWSER_PROFILE}"
-echo "  binary  : ${CB}"
-echo "  datadir : ${BROWSER_DATA_DIR}/default"
-echo "  cdp     : 127.0.0.1:${BROWSER_CDP_PORT}"
-
-cd /private/tmp
-
-# --no-sandbox: Chromium's OWN sandbox is Seatbelt-based, and Seatbelt does not
-#   nest — inside sandbox-exec the zygote cannot issue its sandbox extension
-#   (deny file-issue-extension ... com.apple.app-sandbox.read) and the browser
-#   dies before writing DevToolsActivePort. What is lost is Chromium's internal
-#   renderer/browser split, NOT our boundary: every process in this tree is
-#   still confined by the profile above, which is the stronger of the two.
-# --remote-debugging-address: loopback explicitly. Never 0.0.0.0 — CDP is
-#   unauthenticated, so binding it to a routable address would hand the browser
-#   to the network.
-exec sandbox-exec -f "${BROWSER_PROFILE}" \
-  "${CB}" \
-    --headless \
-    --no-sandbox \
-    --user-data-dir="${BROWSER_DATA_DIR}/default" \
-    --remote-debugging-port="${BROWSER_CDP_PORT}" \
-    --remote-debugging-address=127.0.0.1
+# --publish 127.0.0.1:...  loopback EXPLICITLY. Never a routable address: CDP is
+#   unauthenticated, so binding it anywhere reachable hands the browser to the
+#   network. verify-browser.sh asserts this from the outside.
+# --mount  the only mount. Nothing else may be added here — the container's
+#   security value is precisely that it holds nothing worth stealing.
+#   verify-browser.sh asserts this is the ONLY mount, so a second one is a test
+#   failure, not a convenience.
+# --memory 4g  Apple container defaults are modest and Chromium is not.
+# --env CLOAKBROWSER_AUTO_UPDATE=false  the image ships a Chromium build, but
+#   cloakserve otherwise checks GitHub on every start and downloads a newer one
+#   (~198MB) into /root/.cloakbrowser — which is NOT mounted, so the download
+#   repeats on EVERY container start, and a KeepAlive crash loop would re-pull it
+#   every 30s. It also means the pinned image tag would not actually pin the
+#   browser binary in use. false makes the tag mean what it says.
+# no -d  foreground, so launchd tracks the process lifetime and KeepAlive works.
+# no caffeinate  the agent job already holds the Mac awake; a browser with no
+#   agent driving it has no reason to prevent sleep.
+#
+# WHY `sh -c 'touch /run/.containerenv && exec cloakserve ...'` AND NOT
+# `cloakserve ...` DIRECTLY — do not "simplify" this away:
+#   cloakserve chooses its bind address with
+#   `os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")` —
+#   0.0.0.0 in a container, 127.0.0.1 otherwise. Apple `container` creates
+#   NEITHER marker, so cloakserve binds the container's OWN loopback, while
+#   --publish NATs onto the container's routable interface. The result is a
+#   container that looks perfectly healthy in `container ls` and is permanently
+#   unreachable from the host — a silent hang, not a crash, so KeepAlive never
+#   notices. The marker file makes the detection correct.
+#   This does NOT widen exposure: 0.0.0.0 is inside the container's own network
+#   namespace, and the host side of the publish is still pinned to 127.0.0.1.
+exec container run \
+  --name "${BROWSER_CONTAINER}" \
+  --rm \
+  --publish "127.0.0.1:${BROWSER_CDP_PORT}:9222" \
+  --mount "source=${BROWSER_DATA_DIR},target=/profile" \
+  --memory 4g \
+  --cpus 2 \
+  --env CLOAKBROWSER_AUTO_UPDATE=false \
+  "${BROWSER_IMAGE}" \
+  sh -c "touch /run/.containerenv && exec cloakserve --data-dir=/profile --fingerprint=${BROWSER_FINGERPRINT}"
