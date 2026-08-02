@@ -754,3 +754,329 @@ which the plan scoped as a separate follow-on:
   write a script there and run it. Not an escape — children inherit the
   policy — but the profile controls what code can *reach*, not what code
   *runs*.
+
+## Browser in a container — Phase 0 (2026-08-01)
+
+Spike: `cloakhq/cloakbrowser:0.5.3` under Apple `container`, driven over CDP
+from the host via `agent-browser`, container name `cb-spike`. Torn down
+completely at the end — nothing left running or on disk.
+
+### Port used: 9223, not 9222
+
+`curl -s http://127.0.0.1:9222/json/version` answered before this spike
+started — the existing native browser job (`com.brianlow.claude-sbx.browser`)
+already holds it. Per the task brief, the spike published on
+`127.0.0.1:9223:9222` instead and every command below uses 9223. The native
+browser was never stopped and was re-checked healthy (same
+`webSocketDebuggerUrl` generation, `Chrome/145.0.7632.109`) after the spike's
+teardown.
+
+### Q4 — free binary runs with no license key: YES
+
+`container run --rm cloakhq/cloakbrowser:0.5.3 cloaktest` ran to completion,
+no license key set. Startup banner:
+
+```
+Running the free binary (v146). The latest binary (v150) is free too, with 1 concurrent session.
+Get your key: run  cloakbrowser login  or visit https://cloakbrowser.dev/free
+For more than one concurrent session → https://cloakbrowser.dev
+```
+
+Not a warning that blocks anything — informational only, exit path unaffected.
+`cloaktest` result: 4/6 detectors passed (`bot.sannysoft.com` 56/56,
+`bot.incolumitas.com` 35/36, Rebrowser 🟢7⚪3 clean, CreepJS lies:0;
+`deviceandbrowserinfo.com` flagged `isBot: True` and `BrowserScan` timed out
+navigating — both look like target-site flakiness/geo/IP-reputation issues
+external to the container, not re-investigated).
+
+**Surprise, and it matters for later tasks**: the free binary phones home on
+every `cloakserve` start regardless of license key — `GET
+https://pypi.org/pypi/cloakbrowser/json`, `GET
+https://api.github.com/repos/CloakHQ/cloakbrowser/releases`, and if a newer
+Chromium build exists it **downloads and installs it in the background
+unprompted** (`~198MB` fetched from `cloakbrowser.dev`/GitHub release assets,
+signature-verified with Ed25519 and SHA-256 before extracting to
+`~/.cloakbrowser/chromium-<ver>`). This happened on every fresh `cb-spike`
+start in this spike. Not a blocker here — outbound egress from the container
+is expected and unrestricted — but Task 3/4 should decide whether to pin this
+off (env var not checked; not investigated) since it means the pinned image
+tag does not guarantee a pinned Chromium binary at runtime.
+
+### Critical finding not anticipated by the brief: `cloakserve` binds to loopback *inside* the container by default, and Apple `container --publish` cannot reach it
+
+The very first `container run --detach ... cloakserve --data-dir=/profile
+--fingerprint=41337` came up, logged `CDP multiplexer starting on port 9222`,
+and then **`curl -s --max-time 5 http://127.0.0.1:9223/json/version` from the
+host got "Empty reply from server" indefinitely** (curl exit 52), while
+`container exec cb-spike curl -s http://localhost:9222/json/version` from
+*inside* the container succeeded immediately with a normal CDP document.
+
+Root-caused by reading `/usr/local/bin/cloakserve` inside the image:
+
+```python
+in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+host = "0.0.0.0" if in_container else "127.0.0.1"
+web.run_app(app, host=host, port=port, print=None)
+```
+
+`cloakserve` decides whether to bind all-interfaces vs. loopback-only by
+checking for Docker's `/.dockerenv` or Podman's `/run/.containerenv` marker
+files. Apple's `container` runtime creates **neither** — confirmed with
+`container exec cb-spike ls /.dockerenv /run/.containerenv` (both "No such
+file or directory") — so `in_container` evaluates `False` and `cloakserve`
+binds `127.0.0.1:9222` *inside its own network namespace*. Apple
+`container --publish` NATs onto the container's routable interface, not its
+loopback, so a host-published port can never reach a loopback-only listener:
+confirmed independently with a throwaway container running
+`python3 -m http.server --bind 0.0.0.0` (publish worked, HTTP 200) versus the
+same bound to `127.0.0.1` (unreachable, same as `cloakserve`) — and directly
+via `cat /proc/net/tcp` inside `cb-spike`, which showed the listen socket as
+`0100007F:2406` (127.0.0.1:9222) until the workaround below, and `00000000:2406`
+(0.0.0.0:9222) after.
+
+**Workaround used for the rest of this spike** (Steps 4 onward): start the
+container with a shell wrapper that creates the marker file `cloakserve`
+checks for, before exec'ing it:
+
+```
+container run --detach --name cb-spike \
+  --publish "127.0.0.1:9223:9222" \
+  --mount "source=/tmp/cb-spike-profile,target=/profile" \
+  --memory 4g --cpus 2 \
+  cloakhq/cloakbrowser:0.5.3 \
+  sh -c "touch /run/.containerenv && exec cloakserve --data-dir=/profile --fingerprint=41337"
+```
+
+After this, `/proc/net/tcp` showed `00:2406` bound on `0.0.0.0`, and
+`curl http://127.0.0.1:9223/json/version` from the host returned the CDP
+document immediately, with `webSocketDebuggerUrl` correctly rewritten to
+`ws://127.0.0.1:9223/...` (cloakserve reads the incoming `Host` header to
+build this, so it tracks whatever host:port the client actually connects
+through).
+
+**This is the single most expensive-to-miss fact in this spike.** The brief's
+literal `cloakserve --data-dir=/profile --fingerprint=41337` command line, run
+exactly as written, produces a container that starts cleanly, logs no error,
+and is **permanently unreachable from the host** — a silent hang, not a crash.
+Tasks 3 and 4 must not hardcode the brief's bare command; they need the
+`sh -c "touch /run/.containerenv && exec cloakserve ..."` wrapper (or an
+equivalent — e.g. a `--mount` that pre-creates `/run/.containerenv`, or an
+image-level fix) or the fleet's browser container will come up looking healthy
+in `container ls` while serving nothing.
+
+Not proven: whether a future `cloakserve` release fixes the detection (e.g.
+checking `/proc/1/cgroup` or a cgroup-driver-agnostic signal instead of the
+Docker/Podman marker files), or whether Apple ships a lower-level fix. Treat
+the wrapper as necessary until re-verified against whatever image tag Task 3
+actually pins.
+
+### Q1 — is the port confined to loopback: YES, with one unexplained mismatch
+
+```
+$ LANIP="$(ipconfig getifaddr en0)"; echo "$LANIP"
+192.168.1.52
+$ curl -s --max-time 3 "http://192.168.1.52:9223/json/version"; echo "exit=$?"
+exit=7
+```
+
+`exit=7` is curl's "failed to connect" — the LAN-IP curl **failed**, exactly as
+required. The gate passes.
+
+```
+$ sysctl -n net.inet.ip.forwarding
+1
+```
+
+This does **not** match the brief's "expected and required" value of `0`.
+Checked twice (`sysctl -n` and `sysctl -a | grep forwarding`, both `1`), and
+`net.inet6.ip6.forwarding` is also `1`. `netstat -nr` shows a `bridge100`
+interface and default routes over `utun0`/`utun1` in addition to `en0` — this
+Mac has other networking software (VM/VPN bridging, not investigated which)
+that turns on IP forwarding independent of Apple `container`. So the two
+brief-listed signals disagree: the LAN curl (direct empirical test of
+reachability) says confined; the sysctl (a proxy for "is *anything* capable of
+routing off-host") says forwarding is on for some unrelated reason. **The
+loopback confinement conclusion rests on the curl result, not on
+`ip.forwarding`, on this host.** Also directly confirmed: connecting to the
+container's own vmnet address from the host
+(`curl http://192.168.64.7:9222/...`, bypassing the published-port NAT
+entirely) got connection refused — consistent with `cloakserve` listening
+only on `127.0.0.1` inside its namespace once the workaround is applied, i.e.
+even the container's *own* routable address doesn't expose it.
+
+Not proven: what specifically has `net.inet.ip.forwarding=1` on this host, or
+whether that matters for a *different* published port/service that binds
+`0.0.0.0` the way `cloakserve` now does with the workaround. The empirical
+LAN-curl test is the one to re-run if this is ever re-verified, not the sysctl
+alone.
+
+### Q2 — does the profile survive a restart: NO
+
+Set `document.cookie = 'sbxprobe=1; ...'` via `agent-browser eval` against the
+first `cb-spike`, confirmed `document.cookie` read back `"sbxprobe=1"`. Then:
+
+```
+container stop cb-spike && container rm cb-spike
+container run --detach --name cb-spike ... (same command, same bind mount)
+```
+
+After the restart, `agent-browser eval "document.cookie"` on
+`https://example.com` returned `""` — the cookie is gone.
+
+The bind mount itself does persist and is reused — `/tmp/cb-spike-profile/41337/Default/Cookies`
+exists on the host both before and after the restart, is a real non-empty
+SQLite file (20480 bytes), and Chrome profile directories
+(`GrShaderCache`, `Local State`, `component_crx_cache`, etc.) are present with
+plausible content. But querying the post-restart `Cookies` DB directly
+(`sqlite3 ... "select * from cookies where name='sbxprobe'"`) returns no rows,
+and every file under the profile tree carries the *second* container's start
+time, not the first's — consistent with the profile being freshly
+reinitialized on start rather than the existing SQLite state being reused, but
+this is inference from mtimes, not a confirmed mechanism.
+
+**Per the brief's contingency: the spec's "persistent profile" goal is not
+achievable through `cloakserve --data-dir` as tested.** Task 4 should plan on
+the fallback already anticipated in the brief — try `--user-data-dir=/profile`
+as a Chromium passthrough flag instead of `cloakserve`'s own `--data-dir`, and
+re-test with the same cookie probe.
+
+Not proven: *why* — whether `cloakserve` deliberately treats `--data-dir` as
+scratch space and ignores it for the actual Chromium profile, whether the
+container's SIGTERM on `stop` cuts off Chromium before it flushes its cookie
+store, or something else. Not root-caused further in this spike; worth a
+targeted follow-up (graceful shutdown timing, or a diff of the Cookies file's
+raw bytes before/after) only if Task 4's passthrough-flag fallback also fails.
+
+### Q3 — is the fingerprint seed pinned: YES
+
+With `--fingerprint=41337` on both the pre-restart and post-restart
+container:
+
+| reading | before restart | after restart |
+|---|---|---|
+| `navigator.hardwareConcurrency + '/' + navigator.deviceMemory` | `8 / 8` | `8 / 8` |
+| WebGL `UNMASKED_RENDERER_WEBGL` | `ANGLE (NVIDIA, NVIDIA GeForce RTX 5080 Laptop GPU (0x00002C19) Direct3D11 vs_5_0 ps_5_0, D3D11)` | identical, byte-for-byte |
+
+Identical across the restart that lost the cookie — so fingerprint pinning and
+profile persistence are independent mechanisms in `cloakserve`; the former
+works, the latter (as tested) doesn't. The WebGL context is a real working GL
+context reporting a plausible discrete-GPU renderer string on this Mac's own
+GPU-less headless container — consistent with the sandbox-exec prototype's
+earlier finding (see "WebGL must WORK; the GPU need not be real" above) that
+the fingerprint is spoofed software, not a reflection of real hardware; this
+host has neither an RTX 3080 nor an RTX 5080.
+
+### Multi-seed behavior (not one of Q1-Q4, but flagged per the brief as worth knowing)
+
+A second `curl ".../json/version?fingerprint=99999"` against the same
+`cb-spike` **spawned a second, independent Chromium process** (confirmed via
+the multiplexer's own status page, `curl http://127.0.0.1:9223/`  →
+`"active": 2`, with distinct `pid`/`port` entries for seeds `41337` and
+`99999`) rather than being refused or silently degrading. The free-binary
+banner advertises "1 concurrent session" as a **Pro** upsell
+(`cloakbrowser.dev`), but nothing in the free binary observed here enforces
+that limit locally — a second seed just works. Not a blocker (one agent uses
+one seed, per the brief), but worth knowing: nothing about the free tier stops
+a caller from driving multiple seeds against one `cb-spike`, so any
+enforcement of "one session" has to come from how the fleet calls it, not from
+the image.
+
+### `container ls -q` / `container ls -a --format json` shape (for Task 2's mount parser, Task 3's `grep -qx`)
+
+`container ls -q` prints **all running containers on the host, one name per
+line**, not filtered to ones this spike started — on this host it printed:
+
+```
+hermes-1
+cb-spike
+```
+
+(`hermes-1` is an unrelated running container from other work on this
+machine.) `grep -qx cb-spike` against that output is exactly right — it
+matches the exact line regardless of what else is running, and correctly
+returns non-zero once `cb-spike` is torn down. Stopped containers (`agent-1`
+through `agent-5`, `buildkit`) do **not** appear in `ls -q` — only `-a`
+surfaces them, confirming `ls -q`'s output is running-only.
+
+`container ls -a --format json` returns a **JSON array**, one object per
+container, no wrapping key. The fields Task 2's mount parser and Task 3's
+container-existence check care about, from `cb-spike`'s own entry:
+
+```json
+{
+  "status": "running",
+  "configuration": {
+    "id": "cb-spike",
+    "mounts": [
+      {
+        "destination": "/profile",
+        "source": "/tmp/cb-spike-profile",
+        "type": { "virtiofs": {} },
+        "options": []
+      }
+    ],
+    "publishedPorts": [
+      {
+        "containerPort": 9222,
+        "hostPort": 9223,
+        "hostAddress": "127.0.0.1",
+        "proto": "tcp",
+        "count": 1
+      }
+    ],
+    "initProcess": {
+      "executable": "/entrypoint.sh",
+      "arguments": ["sh", "-c", "touch /run/.containerenv && exec cloakserve --data-dir=/profile --fingerprint=41337"]
+    }
+  },
+  "networks": [
+    { "network": "default", "hostname": "cb-spike", "ipv4Address": "192.168.64.7/24" }
+  ]
+}
+```
+
+Notes for later tasks: the container's own `id` lives at
+`.configuration.id`, not top-level; mounts are `.configuration.mounts[]` with
+`source`/`destination` (not `src`/`dst`); published ports are
+`.configuration.publishedPorts[]` with `hostPort`/`containerPort` as separate
+integer fields and `hostAddress` as a string (`"127.0.0.1"`, confirming the
+loopback binding is recorded in the container's own config, inspectable
+without a live curl). `initProcess.arguments` reflects whatever command was
+actually passed — this is where Task 3's `grep -qx`-style check should look if
+it ever needs to confirm the `.containerenv` workaround shipped, since the
+raw entrypoint (`cloakserve --data-dir=... --fingerprint=...`) alone would not
+show the wrapper.
+
+### Teardown — confirmed clean
+
+```
+container stop cb-spike && container rm cb-spike
+rm -rf /tmp/cb-spike-profile
+container ls -a          # no cb-spike
+container ls -q           # no cb-spike (only hermes-1, unrelated)
+ls /tmp/cb-spike-profile  # No such file or directory
+```
+
+The pre-existing native browser job on port 9222 was re-verified healthy
+afterward (`curl http://127.0.0.1:9222/json/version` → `Chrome/145.0.7632.109`,
+same as before the spike started) — nothing about this spike touched it.
+
+### What's not proven, stated plainly
+
+- **Why** cookies don't survive a restart through `--data-dir` — inferred from
+  file mtimes and an empty SQLite query, not from reading `cloakserve`'s
+  profile-management code path.
+- Whether the `/.dockerenv`/`/run/.containerenv` detection gap is something
+  Apple `container` could fix on its side (e.g. by creating one of those
+  marker files itself, the way it presumably intends containers to detect
+  their environment) rather than needing a wrapper in every `container run`
+  invocation — not investigated; the wrapper is the pragmatic fix, not
+  necessarily the right long-term one.
+- The `net.inet.ip.forwarding=1` discrepancy's root cause on this host.
+- Whether the free binary's background Chromium self-update can be disabled,
+  and whether it should be for a pinned fleet image (an env var was not
+  searched for or tested).
+- Whether `bot.sannysoft`/`bot.incolumitas`/Rebrowser detection results hold up
+  against a real target site relevant to this project — `cloaktest`'s battery
+  is generic bot-detection demo sites, not validated against anything
+  project-specific.
