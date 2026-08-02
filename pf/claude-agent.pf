@@ -1,0 +1,39 @@
+# claude-agent pf anchor — container egress policy: internet yes, home LAN no.
+#
+# Apple Container puts every container on bridge100 / 192.168.64.0/24 and NATs
+# it out en0, which by default also gives it a clean route to every device on
+# the house network: the router's admin page, the NAS, printers, the aquarium
+# controller. Nothing in Apple Container filters that, so it's done here.
+#
+# Loaded by lan-block.sh into /etc/pf.anchors/claude-agent. Rules are `quick`,
+# so first match wins and order matters.
+
+cont_if  = "bridge100"
+cont_net = "192.168.64.0/24"
+cont_gw  = "192.168.64.1"
+
+# Everything a container has no business reaching: RFC1918 (the home LAN is
+# 192.168.0.0/22), link-local, and CGNAT.
+private = "{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10 }"
+
+# 1. DNS survives. Apple Container hands out the bridge address as the
+#    container's only resolver (/etc/resolv.conf -> 192.168.64.1), so the
+#    block on rule 2 would otherwise take the internet down with the LAN.
+pass in quick on $cont_if proto { udp, tcp } from $cont_net to $cont_gw port 53
+
+# 2. Otherwise a container may not talk to the Mac itself — the bridge address
+#    is a back door to anything listening on the host.
+block drop in quick on $cont_if from $cont_net to $cont_gw
+
+# 3. Container-to-container stays open: the agents drive sbx-browser
+#    (CloakBrowser) over this subnet.
+pass in quick on $cont_if from $cont_net to $cont_net
+
+# 4. The home LAN, denied. Everything not matched above — i.e. the public
+#    internet — falls through and is passed.
+block drop in quick on $cont_if from $cont_net to $private
+
+# 5. Same for IPv6. There's no IPv6 egress today, but the LAN carries a ULA
+#    prefix, so don't leave it as an unmonitored bypass. Containers talk to
+#    each other over IPv4, so blocking ULA/link-local wholesale costs nothing.
+block drop in quick on $cont_if inet6 from any to { fc00::/7, fe80::/10 }

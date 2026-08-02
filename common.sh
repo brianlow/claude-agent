@@ -13,6 +13,14 @@ GUI_DOMAIN="gui/$(id -u)"
 VAULT="${HOME}/Library/Mobile Documents/iCloud~md~obsidian/Documents/Brian's Vault"
 BEAR_DIR="${HOME}/Library/Group Containers/9K33E3U3T4.net.shinyfrog.bear/Application Data"
 
+# The fleet's own ~/.claude. Deliberately NOT the host's: that directory holds
+# settings.json (hooks, statusLine) and the ccline binary, all of which the host
+# `claude` executes. Mounting it read-write let any agent — or anything that
+# talked one into it, e.g. a poisoned vault note — plant a command that runs on
+# the Mac, outside every container. Seeded from the host at each launch by
+# agent-run.sh; see seed_fleet_claude_home().
+FLEET_CLAUDE_HOME="${HOME}/.claude-agent/claude-home"
+
 # Remote-reset feature: a launchd poller watches SENTINEL's mtime and, when it
 # changes, recycles the whole fleet. SENTINEL is a note inside the iCloud vault,
 # so editing it from Obsidian mobile (→ iCloud → this Mac) is the remote trigger.
@@ -35,6 +43,39 @@ container_state() {
   state="$(container list --all --format json 2>/dev/null \
     | jq -r --arg id "agent-$1" '.[] | select(.configuration.id==$id) | .status' 2>/dev/null)"
   printf '%s' "${state:-absent}"
+}
+
+# Populate ${FLEET_CLAUDE_HOME} from the host's ~/.claude. Copies only what the
+# agents need to start: credentials, settings, the statusline binary, and
+# plugins. Everything the agents *write* — projects/, history.jsonl,
+# file-history/, shell-snapshots/ — stays in the fleet home and never touches
+# the host copy, so host session transcripts aren't exposed either.
+#
+# Re-run on every launch, so the executable bits are also *repaired* each restart:
+# if an agent ever rewrote settings.json or ccline, the next relaunch (launchd
+# KeepAlive, ≤30s) overwrites it from the host original.
+seed_fleet_claude_home() {
+  mkdir -p "${FLEET_CLAUDE_HOME}"
+  chmod 700 "${FLEET_CLAUDE_HOME}"
+
+  # Directories the host owns: mirror exactly (--delete removes agent additions).
+  local d
+  for d in plugins ccline; do
+    [ -d "${HOME}/.claude/${d}" ] || continue
+    rsync -a --delete "${HOME}/.claude/${d}/" "${FLEET_CLAUDE_HOME}/${d}/"
+  done
+
+  # Flat files the host owns.
+  local f
+  for f in .credentials.json settings.json statusline-ps1.sh; do
+    [ -f "${HOME}/.claude/${f}" ] || continue
+    cp -p "${HOME}/.claude/${f}" "${FLEET_CLAUDE_HOME}/${f}"
+  done
+
+  # entrypoint.sh links this to ~/.claude.json inside the container; it also
+  # writes to it (trust prompt, MCP registration), which is why it's a copy.
+  [ -f "${HOME}/.claude.json" ] && cp -p "${HOME}/.claude.json" "${FLEET_CLAUDE_HOME}/.claude.json"
+  return 0
 }
 
 render_plist() {

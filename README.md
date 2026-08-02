@@ -27,6 +27,70 @@ that crashes or idle-times-out. Startup is manual (no login auto-start).
 - Crash-loop protection: `ThrottleInterval=30` — launchd retries a failing agent
   every 30s indefinitely (self-heals once the cause is fixed).
 
+## Isolation
+
+The agents run `--dangerously-skip-permissions` and Hermes has an unguarded
+write path to the whole vault, so the container is the only thing standing
+between an agent — or anything that talks one into it, e.g. a poisoned vault
+note or a web page — and the Mac. Two host-side boundaries close the paths that
+led back out of it.
+
+**The fleet gets its own `~/.claude`.** Containers mount
+`~/.claude-agent/claude-home`, not the host's `~/.claude`. The host directory
+holds `settings.json` (hooks) and the `ccline` statusline binary, both of which
+your *own* `claude` executes on launch — mounting it read-write meant an agent
+could plant a command that runs on the Mac, outside every container. Read-only
+isn't an option: Claude Code writes `history.jsonl`, `projects/`, and
+`file-history/` continuously, and `entrypoint.sh` rewrites `.claude.json` on
+every start.
+
+`seed_fleet_claude_home()` (in `common.sh`) copies the host-owned pieces —
+credentials, `settings.json`, `plugins/`, `ccline/` — into the fleet home at
+every launch. So the flow is one-way, and because launchd relaunches within
+30s, anything an agent rewrote gets repaired on the next start. Agent-written
+state (sessions, transcripts) stays in the fleet home and never reaches yours;
+your 87MB of host session history is no longer exposed to them either.
+
+**Containers can't reach the home LAN.** Apple Container bridges every
+container onto `192.168.64.0/24` and NATs it out, which also hands it the
+router's admin page, the NAS, and the aquarium controller. `container run` has
+no egress policy (only `--network` / `--dns`), so it's enforced on the host with
+pf:
+
+```sh
+sudo ./lan-block.sh install    # load the anchor + a LaunchDaemon so it survives reboot
+./lan-block.sh test            # probe LAN + internet from inside a live container
+./lan-block.sh status          # pf state and the active rules
+sudo ./lan-block.sh uninstall
+```
+
+Rules live in `pf/claude-agent.pf`: DNS to the bridge and container-to-container
+traffic pass (the agents drive `sbx-browser` that way), everything else RFC1918
+is dropped, and the public internet falls through untouched. To let agents reach
+one LAN device again, add a `pass … to <ip>` line above the block rule and
+re-run `install`.
+
+Two things that will waste an hour if you don't know them:
+
+**A full `pfctl -f /etc/pf.conf` silently kills container internet.** It reloads
+the main ruleset, which discards the NAT rules Apple Container's vmnet service
+installed at `container system start`. The symptom is misleading — DNS still
+resolves (that's the bridge itself, not NAT) so it looks like a bad filter rule,
+but every outbound connection dies. Recover with:
+
+```sh
+container system stop && container system start
+./hermes/hermes-run.sh     # launchd restarts agent-1..5 on its own
+```
+
+`lan-block.sh` only does the full load on the *first* install; afterwards it
+loads into the anchor alone (`pfctl -a claude-agent -f …`), which leaves NAT
+alone — so editing rules later is non-disruptive. `test` reports `dns=ok`
+alongside the probes precisely so this failure is identifiable.
+
+**`/etc/pf.conf` is Apple's file** — a macOS update can replace it and silently
+drop the anchor. `./lan-block.sh status` tells you; re-run `install` to fix.
+
 ## Remote reset (recover a hung agent from anywhere)
 
 launchd auto-restarts an agent that *exits*, but not one that's wedged/hung while

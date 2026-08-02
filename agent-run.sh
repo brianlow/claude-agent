@@ -15,10 +15,11 @@ container system status &>/dev/null || container system start
 # Clean slot: drop any stale/stopped/running container with this name.
 container rm -f "${NAME}" &>/dev/null || true
 
-# Host-side prep: sync gcalcli oauth and stash ~/.claude.json into the mount.
+# Host-side prep: sync gcalcli oauth, and build the fleet's own ~/.claude from
+# the host's (credentials/settings/plugins in, agent-written state stays put).
 mkdir -p "${HOME}/.gcalcli"
 cp "${HOME}/Library/Application Support/gcalcli/oauth" "${HOME}/.gcalcli/oauth" 2>/dev/null || true
-[ -f "${HOME}/.claude.json" ] && cp "${HOME}/.claude.json" "${HOME}/.claude/.claude.json"
+seed_fleet_claude_home
 
 # Foreground (no -d) so launchd tracks the process lifetime. --tty gives the
 # claude TUI a pty; no --interactive because no stdin is attached under launchd.
@@ -30,7 +31,7 @@ exec caffeinate -dims container run \
   --env COLORTERM=truecolor \
   --env "AGENT_SESSION_NAME=${NAME}" \
   --mount "source=${VAULT},target=/vault" \
-  --mount "source=${HOME}/.claude,target=/home/user/.claude" \
+  --mount "source=${FLEET_CLAUDE_HOME},target=/home/user/.claude" \
   --mount "source=${HOME}/.gcalcli,target=/home/user/.local/share/gcalcli" \
   --mount "source=${BEAR_DIR},target=/bear,readonly" \
   --workdir /vault \

@@ -44,6 +44,10 @@ Three zones, two with a host path.
   by us) and the vault's own `CLAUDE.md` auto-load into every session.
 - **`/opt/hermes`** — the install tree inside the image. Read-only, disposable.
 
+Network: outbound only, and the home LAN is fenced off by the host pf anchor —
+see [Isolation](../README.md#isolation). Hermes shares the container subnet with
+the Claude fleet and `sbx-browser`, which stays reachable.
+
 The memory design: `memories/MEMORY.md` is capped at 2,200 chars and injected
 into every system prompt, so it's an **index, not a store** — one line per
 thing, pointing at the vault note that holds it. `.hermes.md` tells the agent to
