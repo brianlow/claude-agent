@@ -2,7 +2,7 @@
 # sbx-status.sh — show launchd + process state of the sandbox-exec fleet.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/fleet-common.sh"
+source "${SCRIPT_DIR}/sbx-common.sh"
 
 # WHY THIS SCRUBS, AND WHY IT TAILS THE DEBUG LOG RATHER THAN agent-N.log
 #

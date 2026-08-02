@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# verify-browser.sh — assert the security properties of the browser CONTAINER.
+# sbx-verify-browser.sh — assert the security properties of the browser CONTAINER.
 #
 # This file used to assert the security property of a SECOND SEATBELT PROFILE.
 # That profile is gone: the browser now runs in an Apple container, so the
@@ -22,7 +22,7 @@
 #      denial is what makes the failure mode safe.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${HERE}/fleet-common.sh"
+source "${HERE}/sbx-common.sh"
 
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); printf '  \033[32mok\033[0m    %s\n' "$1"; }

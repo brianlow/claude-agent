@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# fleet-common.sh — shared config + helpers for the sandbox-exec fleet.
+# sbx-common.sh — shared config + helpers for the sandbox-exec fleet.
+# Every sbx-*.sh script sources this; it is the one place fleet-wide config lives.
 # SOURCE this file; do not execute it. Deliberately does NOT set
 # `set -euo pipefail` so it can't alter a caller's shell options.
 #
@@ -28,7 +29,7 @@ LABEL_PREFIX="com.brianlow.claude-sbx"
 LOG_DIR="${HOME}/.claude-sbx/logs"
 PLIST_DIR="${SBX_DIR}/launchd"
 GEN_DIR="${SBX_DIR}/generated"
-PROFILE_TEMPLATE="${SBX_DIR}/profiles/06-production.sb.template"
+PROFILE_TEMPLATE="${SBX_DIR}/profiles/agent.sb.template"
 GUI_DOMAIN="gui/$(id -u)"
 
 VAULT="${HOME}/Library/Mobile Documents/iCloud~md~obsidian/Documents/Brian's Vault"

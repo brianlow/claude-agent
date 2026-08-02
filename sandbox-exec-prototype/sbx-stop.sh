@@ -5,7 +5,7 @@
 # Apple Container fleet is unaffected even if it happens to be loaded.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/fleet-common.sh"
+source "${SCRIPT_DIR}/sbx-common.sh"
 
 for n in "${AGENTS[@]}"; do
   label="$(label_for "$n")"

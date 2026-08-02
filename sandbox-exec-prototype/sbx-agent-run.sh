@@ -18,8 +18,7 @@
 # one boundary, in the kernel, where the session operator can't reach it.
 #
 # Why pty-run.py instead of `script -q /dev/null`: `script` is fine from an
-# interactive terminal (that's what the prototype's run-test.sh uses) but fails
-# two ways under launchd.
+# interactive terminal, but fails two ways under launchd.
 #
 #   1. It sizes the pty from its own stdin. launchd gives it no terminal, so
 #      the pty comes up 0 rows x 0 columns and the TUI hangs on it — silently.
@@ -32,7 +31,7 @@
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/fleet-common.sh"
+source "${SCRIPT_DIR}/sbx-common.sh"
 
 N="${1:?usage: sbx-agent-run.sh <N>}"
 SESSION="$(session_for "$N")"
@@ -87,7 +86,7 @@ install -m 0755 "${SCRIPT_DIR}/pty-run.py" "${PTY_RUN}"
 #
 # --settings takes precedence over the user settings file (verified: the same
 # `ls ~/Documents` that returns EPERM without it lists the directory with it).
-install -m 0644 "${SCRIPT_DIR}/fleet-settings.json" "${SETTINGS}"
+install -m 0644 "${SCRIPT_DIR}/sbx-settings.json" "${SETTINGS}"
 
 # Point agent-browser at the browser sandbox's CDP port, so the agent doesn't
 # have to know it exists — `agent-browser open <url>` just works and lands in
@@ -104,7 +103,7 @@ install -m 0644 "${SCRIPT_DIR}/fleet-settings.json" "${SETTINGS}"
 #   Operation not permitted (os error 1)
 # — so a wedged browser job degrades to "no browser", never to "an unconfined
 # browser outside the sandbox".
-install -m 0644 "${SCRIPT_DIR}/agent-browser-config.json" "${AB_CONFIG}"
+install -m 0644 "${SCRIPT_DIR}/sbx-agent-browser.json" "${AB_CONFIG}"
 export AGENT_BROWSER_CONFIG="${AB_CONFIG}"
 
 [ -x "${CLAUDE_BIN}" ] || { echo "claude not executable at ${CLAUDE_BIN}" >&2; exit 1; }

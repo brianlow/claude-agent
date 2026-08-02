@@ -3,10 +3,10 @@
 # already-loaded agents are left running; only missing ones are bootstrapped.
 #
 # Touches nothing belonging to the Apple Container fleet — different launchd
-# labels, plists, logs and session names. See fleet-common.sh for the table.
+# labels, plists, logs and session names. See sbx-common.sh for the table.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/fleet-common.sh"
+source "${SCRIPT_DIR}/sbx-common.sh"
 
 mkdir -p "${PLIST_DIR}" "${LOG_DIR}" "${GEN_DIR}" "${BROWSER_DATA_DIR}"
 

@@ -1,5 +1,19 @@
 # Running log
 
+> **This is the archive, not the documentation.** `README.md` describes the
+> fleet as it stands — commands, setup, and what is still open. This file is the
+> chronological record of building it: what broke, what was measured, which
+> escapes were found, and which approaches were tried and abandoned. Kept
+> because most of the profile's rules exist for a specific reason recorded only
+> here, and because several dead ends are worth not re-walking.
+>
+> Written against `PLAN.md`, which it references throughout. That file was
+> deleted when the spike finished, along with the numbered profile revisions
+> `00`–`05`; both are in git history (through commit `e21c43c`) if a reference
+> needs chasing. Two renames postdate most of this file: `fleet-common.sh` is
+> now `sbx-common.sh`, and `profiles/06-production.sb.template` is now
+> `profiles/agent.sb.template`.
+
 ## Setup deviations from PLAN.md
 
 **Claude binary.** The plan says "plain npm-installed `claude`". There is no

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# verify-detection.sh — does the containerized browser still beat bot detection?
+# sbx-verify-detection.sh — does the containerized browser still beat bot detection?
 #
 # The whole point of CloakBrowser is fingerprint realism, and this change swaps
 # the binary underneath it (macOS Chromium 145 / 26 patches -> Linux Chromium
@@ -10,7 +10,7 @@
 # fingerprint, not whether a retailer serves you a product page.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${HERE}/fleet-common.sh"
+source "${HERE}/sbx-common.sh"
 
 CDP="http://127.0.0.1:${BROWSER_CDP_PORT}"
 curl -s --max-time 5 "${CDP}/json/version" >/dev/null 2>&1 || {

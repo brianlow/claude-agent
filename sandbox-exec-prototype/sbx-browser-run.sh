@@ -29,7 +29,7 @@
 #   NOT FIXED — the browser plist carries no EnvironmentVariables dict, so this
 #   job inherits the launchd gui-domain environment, and `launchctl setenv` is
 #   reachable from inside the agent's Seatbelt profile. Two values in
-#   fleet-common.sh read from that environment: BROWSER_FINGERPRINT and
+#   sbx-common.sh read from that environment: BROWSER_FINGERPRINT and
 #   BROWSER_CDP_PORT. Each is passed as ONE fully-quoted argv element — the seed
 #   via --env, dereferenced by NAME inside the container, never interpolated
 #   into the `sh -c` string — so the most either can do is change its own value:
@@ -40,7 +40,7 @@
 # spawns a process.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/fleet-common.sh"
+source "${SCRIPT_DIR}/sbx-common.sh"
 
 mkdir -p "${LOG_DIR}" "${BROWSER_DATA_DIR}"
 
@@ -62,10 +62,10 @@ echo "  seed      : ${BROWSER_FINGERPRINT}"
 
 # --publish 127.0.0.1:...  loopback EXPLICITLY. Never a routable address: CDP is
 #   unauthenticated, so binding it anywhere reachable hands the browser to the
-#   network. verify-browser.sh asserts this from the outside.
+#   network. sbx-verify-browser.sh asserts this from the outside.
 # --mount  the only mount. Nothing else may be added here — the container's
 #   security value is precisely that it holds nothing worth stealing.
-#   verify-browser.sh asserts this is the ONLY mount, so a second one is a test
+#   sbx-verify-browser.sh asserts this is the ONLY mount, so a second one is a test
 #   failure, not a convenience.
 # --memory 4g  Apple container defaults are modest and Chromium is not.
 # --env CLOAKBROWSER_AUTO_UPDATE=false  the image ships a Chromium build, but
@@ -74,10 +74,10 @@ echo "  seed      : ${BROWSER_FINGERPRINT}"
 #   repeats on EVERY container start, and a KeepAlive crash loop would re-pull it
 #   every 30s. It also means the pinned image tag would not actually pin the
 #   browser binary in use. false makes the tag mean what it says.
-#   verify-browser.sh asserts this variable is present on the RUNNING container,
+#   sbx-verify-browser.sh asserts this variable is present on the RUNNING container,
 #   because deleting it breaks nothing that any other check can see.
 # --env BROWSER_FINGERPRINT=...  the seed travels as DATA, not as text spliced
-#   into a command string. It is env-overridable (fleet-common.sh) and this job
+#   into a command string. It is env-overridable (sbx-common.sh) and this job
 #   inherits the gui-domain environment, so interpolating it into the `sh -c`
 #   body below — which is what this script used to do — let anyone who can call
 #   `launchctl setenv` inject shell metacharacters into the container's command
