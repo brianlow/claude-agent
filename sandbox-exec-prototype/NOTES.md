@@ -131,7 +131,7 @@ denial that matters. `probe.sh` deny-lists system noise instead.
 | 01 | `(deny default)` + `bsd.sb` + system exec/read, scratch cwd | Started first try — dyld and fork/exec fine. Failed at auth. |
 | 02 | keychain (securityd mach-lookup + `user-preference-read`), `~/.claude.json.tmp.*`, `~/.local/state/claude`, git/node/npx exec | `SANDBOX_PROBE_OK`, exit 0 |
 | 03 | target allow-list: vault rw, Bear **ro**, gcalcli rw, plus deny-backstops | works; **verify.sh found a real escape** |
-| 04 | close LaunchServices hole; `~/.npm`; DNSConfiguration | works; verify.sh 16/16 |
+| 04 | close LaunchServices hole; `~/.npm`; DNSConfiguration | works; verify.sh fail=0 |
 
 `(import "bsd.sb")` is available on this machine and does a lot of the heavy
 lifting — worth knowing before hand-writing syscall rules.
@@ -174,7 +174,7 @@ question for productionizing, not a profile fix; `verify.sh` now reports it as
 Bear write-denial is verified working regardless, which is the direction that
 matters for data safety.
 
-### verify.sh against revision 04 — 16/16
+### verify.sh against revision 04 — fail=0
 
 Denied: `~/.ssh` read/list/write, `~/Documents`, `~/Desktop`, `~/dev`,
 `/etc` write, `~/Library/Messages`, Bear writes (both the group container and
@@ -278,7 +278,7 @@ would still have been stopped.
 | # | criterion | status |
 |---|---|---|
 | 1 | wrapped `--remote-control` session pairs and appears in Fleet | **met** (Phase 0, and again with profile 04) |
-| 2 | filesystem access outside allowed roots denied at OS level, confirmed live | **met** (`verify.sh` 16/16 + live session) |
+| 2 | filesystem access outside allowed roots denied at OS level, confirmed live | **met** (`verify.sh` fail=0 + live session) |
 | 3 | denial survives toggling the in-app sandbox off | **met** (above) |
 | 4 | (stretch) network egress scoped | not started |
 
@@ -329,7 +329,7 @@ What Chromium actually needed was mundane:
 `IOSurfaceRootUserClient` / `AGXDeviceUserClient` (GPU) stay denied — headless
 doesn't need them.
 
-Regression-checked after all of this: `verify.sh` still 16/16 (the `open -a`
+Regression-checked after all of this: `verify.sh` still fail=0 (the `open -a`
 hole stays closed), and `claude -p` still returns `SANDBOX_PROBE_OK`.
 
 Incidentally confirmed correctly denied: the `kicad` MCP server in the user's
@@ -378,7 +378,7 @@ log dir and the python3 needed by the pty launcher. Paths are templated
 silently persists. `sbx-agent-run.sh` compile-checks the profile before exec so
 a syntax error fails loudly instead of becoming a 30s KeepAlive spin.
 
-Verified: `verify.sh generated/sbx-agent-1.sb` → 16/16, and `~/dev/claude-agent`
+Verified: `verify.sh generated/sbx-agent-1.sb` → fail=0, and `~/dev/claude-agent`
 and the prototype dir are both denied now (they were allowed in rev 05).
 
 ### Getting it to actually start under launchd — three failures
@@ -579,6 +579,14 @@ installing them:
 
 ## CloakBrowser — built (2026-08-01), split sandbox
 
+> **Superseded 2026-08-01 by "Browser in a container" below.** The split-sandbox
+> design was right about the shape — two capability sets, joined over CDP — and
+> wrong that the browser half had to be a Seatbelt profile at all. The section's
+> own honest note, "the rev-04 escape is moved, not deleted", is what eventually
+> retired it: a Linux container has no LaunchServices or WindowServer to grant.
+> Kept because the diagnosis (the TransformProcessType abort, the -[NSWindow
+> _close] SIGSEGV) is what proved the two sets are irreconcilable in one profile.
+
 Working end to end: a live agent inside its own sandbox drives CloakBrowser
 inside a *different* sandbox, and passes bot detection.
 
@@ -613,7 +621,11 @@ are irreconcilable in one profile, so they live in two:
 
 `sbx-browser-run.sh` + `profiles/07-browser.sb.template`, launchd job
 `com.brianlow.claude-sbx.browser`. `verify-browser.sh` → **20/20**;
-`verify.sh` on the agent profile → still **16/16**, no regression.
+`verify.sh` on the agent profile → still **fail=0**, no regression.
+*(`profiles/07-browser.sb.template` and the `probe-cloakbrowser.sh` probe that
+exercised it were deleted 2026-08-01, commit `9fc9211`, once the browser moved
+into a container — see "Browser in a container" below. `sbx-browser-run.sh`
+was not deleted; it was rewritten to drive the container instead.)*
 
 ### The security argument, and its holes
 
@@ -651,6 +663,12 @@ What does not, and should be said plainly:
    `Keychain lookup failed … (-50)` — that is the Keychain deny working, and it
    means Chromium cannot use the OS keychain to encrypt cookies at rest. A
    browser that can log in is a secret store however tight its profile is.
+   *(`~/.claude-sbx/browser/` — 101M — has since been deleted along with this
+   profile. The container's profile lives in `browser-profile/` instead, and
+   Task 4 found it does not persist cookies across a restart either — see
+   "Task 4 verification" below. So the concern this bullet raised is now moot
+   for a different reason than intended: not a tighter secret store, but no
+   persistent secret store at all.)*
 4. Two sandboxes and two restart levers now. `KeepAlive` restarts a browser
    that *exits*; a browser that wedges while still running is invisible to it,
    which is why `sbx-status.sh` probes `/json/version` rather than trusting the
@@ -736,12 +754,18 @@ which the plan scoped as a separate follow-on:
   covers the browser case end to end — but note the two are independent paths:
   Playwright drives `headless_shell` *inside* the agent sandbox, CloakBrowser
   is driven over CDP in the *other* sandbox.
-- **CloakBrowser from a live remote-control session.** Verified by driving
-  `agent-browser` under the agent's own profile, which is the same enforcement
-  path — but not yet from inside a real Fleet session.
-- **Decide whether the browser should stay logged in.** `--session-name`
-  persistence is off today. Turning it on makes the browser sandbox
-  credential-bearing, and cookies there are not keychain-encrypted (see above).
+- **The browser from a live remote-control session, against a real retailer.**
+  The browser is now `cloakhq/cloakbrowser:0.5.3` in a container (see "Browser
+  in a container" below), not the Seatbelt profile this bullet originally
+  meant. `verify-detection.sh` already drives `agent-browser` against the live
+  launchd job and gets clean bot-detection scores (Task 5), but that is a
+  scripted probe, not a real Fleet session. Still open, still a human's job —
+  this is Task 8.
+- ~~**Decide whether the browser should stay logged in.**~~ **Settled by
+  force, not by decision.** The container profile is ephemeral: Task 4
+  confirmed cookies do not survive a container restart under either
+  `--data-dir=/profile` or the `--user-data-dir` fallback, and the spec forbids
+  account logins outright. There is no persistent session to decide about.
 - `/private/tmp` is granted read/write and is world-writable and shared with
   every other process on the machine. Probably worth narrowing to a private
   temp dir.

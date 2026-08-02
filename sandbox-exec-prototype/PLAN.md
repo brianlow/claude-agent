@@ -5,7 +5,7 @@
 > | | |
 > |---|---|
 > | Phase 0 (does it pair at all) | **done** — passed first try |
-> | Phase 1 (tighten the profile) | **done** — 6 revisions, `verify.sh` 16/16 |
+> | Phase 1 (tighten the profile) | **done** — 6 revisions, `verify.sh` fail=0 |
 > | Phase 2 (network) | **descoped by decision** — full internet is wanted |
 > | Productionizing (launchd) | **done for a fleet of 1** (`sbx-agent-1`) |
 >
@@ -97,8 +97,8 @@ belt-and-suspenders while nothing is actually being restricted yet.
 
 ## Phase 1 — Iterative tightening, starting from fully restricted  ✅ DONE
 
-> Six revisions (`profiles/01`–`06`). `verify.sh` codifies step 5 and passes
-> 16/16. Step 4's audit found a real LaunchServices escape that every
+> Six revisions (`profiles/01`–`06`). `verify.sh` codifies step 5 and reports
+> fail=0. Step 4's audit found a real LaunchServices escape that every
 > functional check had already passed — exactly the risk this section warned
 > about, and the single most useful result of the spike.
 
@@ -195,20 +195,19 @@ sandbox-exec-prototype/
     04-no-launchservices.sb      closes the `open -a` hole
     05-playwright.sb             headless Chromium
     06-production.sb.template    05 minus spike scaffolding; templated paths
-    07-browser.sb.template       the SECOND sandbox — CloakBrowser only
 
   # spike tooling (interactive)
   run-test.sh              sandbox-exec + claude --remote-control, from a terminal
   probe.sh                 `claude -p` under a profile + every Seatbelt denial
   probe-chromium.sh        headless Chromium under a profile + denials
-  probe-cloakbrowser.sh    CloakBrowser + agent-browser under a profile + denials
-  verify.sh                the security assertions (Phase 1 step 5) — 16 checks
-  verify-browser.sh        the browser sandbox's assertions — 20 checks
+  verify.sh                the security assertions (Phase 1 step 5) — 17 checks
+  verify-browser.sh        the browser container's assertions — 11 checks
+  verify-detection.sh      bot-detection scores (sannysoft / incolumitas) against the live browser job
 
   # fleet (launchd)
   fleet-common.sh          config + plist/profile rendering
   sbx-agent-run.sh         one agent, foreground, launchd-managed
-  sbx-browser-run.sh       CloakBrowser in its own sandbox, CDP on loopback
+  sbx-browser-run.sh       the browser as an Apple `container`, CDP republished to loopback
   sbx-start.sh / sbx-stop.sh / sbx-status.sh
   pty-run.py               pty with a real window size (replaces `script`)
   fleet-settings.json      installed as --settings; in-app sandbox off
@@ -216,6 +215,7 @@ sandbox-exec-prototype/
 
   generated/               rendered per-agent profiles   (gitignored)
   launchd/                 rendered plists               (gitignored)
+  browser-profile/         bind-mounted browser data dir; ephemeral except the fingerprint seed (gitignored)
   scratch/ logs/           spike working dirs            (gitignored)
 ```
 
@@ -256,16 +256,25 @@ name in that list should trace to an observed denial *and* a reason.
 **Read `NOTES.md` first** — it carries the findings and the full open list.
 
 Current state: `sbx-agent-1` runs under launchd, sandboxed, cwd = the vault,
-paired to Fleet — **plus a second launchd job running CloakBrowser in its own
-Seatbelt profile**, which the agent drives over localhost CDP. `./sbx-status.sh`
+paired to Fleet — **plus a second launchd job, `com.brianlow.claude-sbx.browser`,
+running the browser as an Apple `container`** (`cloakhq/cloakbrowser:0.5.3`),
+which the agent reaches only over CDP on `127.0.0.1:9222`. `./sbx-status.sh`
 to check both, `./sbx-start.sh` / `./sbx-stop.sh` to control. The Apple
-Container fleet is untouched and not running.
+Container *fleet* (the agent-side container world this prototype replaced) is
+untouched and not running — the browser container is unrelated to that and is
+the current, live arrangement.
 
-The browser could not be put in the agent's profile — it needs LaunchServices
-and WindowServer, which are the exact grants rev 04 and rev 05 removed. Read
-"CloakBrowser — built" in NOTES.md before touching either profile; the split is
-load-bearing, and the reason it is safe is that **launchd owns the browser's
-command line, not the agent**.
+The browser was never put in the agent's Seatbelt profile, and now there is no
+Seatbelt profile for it at all: `profiles/07-browser.sb.template` and
+`probe-cloakbrowser.sh` are deleted (commit `9fc9211`). A Linux container has
+no LaunchServices or WindowServer to grant in the first place, which is what
+made the container the actual fix rather than a workaround. Read "Browser in a
+container" in NOTES.md before touching the browser job; the split is still
+load-bearing, and the reason it is safe is unchanged: **launchd owns the
+browser's command line, not the agent** — a hostile session operator cannot
+add `--allow-file-access`, repoint the profile dir, add a mount, or load an
+extension, and CDP has no verb that spawns a process. The browser holds
+nothing of value.
 
 Ground rule still in force: **nothing outside `sandbox-exec-prototype/` gets
 modified** — not `entrypoint.sh`, `agent-run.sh`, `common.sh`, `Dockerfile`,
@@ -285,8 +294,8 @@ Ready to build:
 
 3. **Playwright end-to-end.** Headless Chromium is verified under the profile
    directly, but `claude → @playwright/mcp → browser` has never been driven
-   from inside a live session. Lower priority now that the CloakBrowser path
-   works end to end (see NOTES.md, "CloakBrowser — built").
+   from inside a live session. Lower priority now that the containerized
+   browser path works end to end (see NOTES.md, "Browser in a container").
 4. **Scale past one agent.** `AGENTS=(1)` in `fleet-common.sh`. Worth thinking
    about whether N agents sharing one vault cwd is actually wanted — note the
    container fleet had the same property, so this isn't a regression.
