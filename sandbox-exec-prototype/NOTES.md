@@ -1215,12 +1215,16 @@ Google Inc. (NVIDIA) | ANGLE (NVIDIA, NVIDIA GeForce RTX 5080 Laptop GPU (0x0000
 
 === incolumitas (bot.incolumitas.com #detection-tests)
 intoli: 6/6 OK (userAgent, webDriver, webDriverAdvanced, pluginsLength, pluginArray, languages)
-fpscanner: 19/20 OK, 1 FAIL (WEBDRIVER)
+fpscanner: 20/21 OK, 1 FAIL (WEBDRIVER)
 total: 26/27 OK
 
 === sannysoft (bot.sannysoft.com)
-58 table rows, all "ok"/"passed"/plain informational — no red/FAIL rows found
-in either the first 25 rows or the remaining 33
+`verify-detection.sh` captures and prints the first 25 of 58 table rows (per
+the brief) — all "ok"/"passed"/plain informational, no red/FAIL rows. The
+remaining 33 rows were spot-checked by hand at the time and were likewise
+clean, but that check is not part of the committed script, so it is a
+one-off observation here, not something a re-run of `verify-detection.sh`
+reproduces.
 ```
 
 The WebGL string is byte-for-byte the same fabricated `RTX 5080 Laptop GPU`

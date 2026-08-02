@@ -43,6 +43,11 @@ agent-browser open "https://bot.incolumitas.com/" >/dev/null
 # was not enough on this machine on the first attempt (see deviation note in
 # task-5-report.md) — poll instead of a single fixed sleep, so a slow run
 # doesn't get recorded half-finished.
+#
+# NOTE: this is a text-LENGTH check, not a DOM-settled check — a
+# still-rendering page whose text happens to be the same length on two
+# consecutive polls would exit early. Didn't happen in practice, but it's a
+# real gap if this is ever reused against a page with that failure mode.
 DEADLINE=$((SECONDS + 60))
 LAST_LEN=0
 STABLE_COUNT=0
