@@ -47,50 +47,56 @@ CLAUDE_BIN="${CLAUDE_BIN:-${HOME}/.local/bin/claude}"
 # does.
 export PATH="${HOME}/.asdf/shims:${HOME}/.asdf/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
-# --- browser (the second sandbox) -------------------------------------------
-# CloakBrowser cannot run inside the agent's profile: it needs LaunchServices
+# --- browser (a container, not a second sandbox) -----------------------------
+# The browser USED to run natively under profiles/07-browser.sb.template. It
+# could not run in the agent's profile: it needs LaunchServices
 # (TransformProcessType abort()s without it) and WindowServer (SIGSEGV in
-# -[NSWindow _close] without it), which are precisely the grants the agent
-# profile exists to withhold. So it gets its own launchd job and its own
-# Seatbelt profile, and the agent reaches it only over localhost CDP.
-# See profiles/07-browser.sb.template and NOTES.md.
-BROWSER_PROFILE_TEMPLATE="${SBX_DIR}/profiles/07-browser.sb.template"
-BROWSER_PROFILE="${GEN_DIR}/sbx-browser.sb"
-BROWSER_DATA_DIR="${HOME}/.claude-sbx/browser"
+# -[NSWindow _close] without it) — precisely the grants revisions 04 and 05
+# removed to close the `open -a` confused-deputy escape.
+#
+# Giving those grants to a second profile moved that escape rather than
+# deleting it: a Chromium exploit from a hostile page landed in a sandbox that
+# could launch unconfined GUI apps. A Linux container has no LaunchServices and
+# no WindowServer to grant, so the capability is gone rather than relocated.
+#
+# What is deliberately unchanged: launchd owns the browser's command line, not
+# the agent. A hostile session operator cannot add --allow-file-access, repoint
+# the profile dir, load an extension, or add a mount. The agent's only reach is
+# CDP, and CDP has no verb that spawns a process.
+BROWSER_IMAGE="cloakhq/cloakbrowser:0.5.3"     # pinned; :latest would change the browser under us
+BROWSER_CONTAINER="sbx-browser"
+BROWSER_DATA_DIR="${SBX_DIR}/browser-profile"  # in-repo and gitignored, so browser state is local to the project
 
-# Bound to loopback. Chromium's CDP has NO authentication, so this port is
-# ambient authority for every local process — not just our agent. Loopback is
-# what keeps it off the network; there is no auth to add.
+# Bound to loopback on the host side. Chromium's CDP has NO authentication, so
+# this port is ambient authority for every local process — not just our agent.
+# Loopback is what keeps it off the network; there is no auth to add.
 BROWSER_CDP_PORT="${BROWSER_CDP_PORT:-9222}"
 
-# Resolved by glob, not pinned: cloakbrowser self-updates into a new
-# chromium-<version>/ directory, and the profile grants the whole
-# ~/.cloakbrowser subpath, so an update must not require a config edit here.
-cloak_bin() {
-  ls -d "${HOME}"/.cloakbrowser/chromium-*/Chromium.app/Contents/MacOS/Chromium 2>/dev/null | sort -V | tail -1
-}
+# A pinned fingerprint seed. Without one, CloakBrowser generates a random
+# identity at every startup — so a launchd restart would make the same cookie
+# jar arrive on the same site wearing a different device. Cookies and identity
+# have to agree; this is what makes the persistent profile coherent.
+BROWSER_FINGERPRINT="${BROWSER_FINGERPRINT:-41337}"
 
-browser_label()   { printf '%s.browser' "${LABEL_PREFIX}"; }
-browser_plist()   { printf '%s/%s.plist' "${PLIST_DIR}" "$(browser_label)"; }
-browser_pid()     { pgrep -f -- "--remote-debugging-port=${BROWSER_CDP_PORT}" 2>/dev/null | head -1; }
+browser_label() { printf '%s.browser' "${LABEL_PREFIX}"; }
+browser_plist() { printf '%s/%s.plist' "${PLIST_DIR}" "$(browser_label)"; }
+
+# `container ls -q` prints one container ID per line, and --name sets the ID.
+# Matching whole lines keeps this independent of the table format.
+browser_container_running() { container ls -q 2>/dev/null | grep -qx "${BROWSER_CONTAINER}"; }
+browser_container_present() { container ls -a -q 2>/dev/null | grep -qx "${BROWSER_CONTAINER}"; }
 
 browser_state() {
-  local pid; pid="$(browser_pid)"
-  if [ -z "$pid" ]; then printf 'absent'; return; fi
+  if ! browser_container_present; then printf 'absent'; return; fi
+  if ! browser_container_running; then printf 'stopped'; return; fi
+  # A running container is NOT proof of a working browser, and launchd cannot
+  # tell the difference — KeepAlive only sees that the job still exists. The
+  # CDP probe is the source of truth, same as it was for the native browser.
   if curl -s --max-time 2 "http://127.0.0.1:${BROWSER_CDP_PORT}/json/version" >/dev/null 2>&1; then
-    printf 'running (pid %s, CDP %s ok)' "$pid" "${BROWSER_CDP_PORT}"
+    printf 'running (container, CDP %s ok)' "${BROWSER_CDP_PORT}"
   else
-    # Alive but not answering CDP — the wedged case KeepAlive cannot detect,
-    # since launchd only sees that the process still exists.
-    printf 'running (pid %s, CDP NOT RESPONDING)' "$pid"
+    printf 'running (container up, CDP NOT RESPONDING)'
   fi
-}
-
-render_browser_profile() {
-  sed -e "s|__HOME__|${HOME}|g" \
-      -e "s|__VAULT__|${VAULT}|g" \
-      -e "s|__LOGDIR__|${HOME}/.claude-sbx|g" \
-      "${BROWSER_PROFILE_TEMPLATE}"
 }
 
 label_for()   { printf '%s.%s' "${LABEL_PREFIX}" "$1"; }
