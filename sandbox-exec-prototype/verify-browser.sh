@@ -37,9 +37,11 @@ fi
 echo
 echo "--- CDP must be unreachable from anywhere but this Mac"
 # CDP has no auth, so this is the entire boundary. Two independent facts have
-# to hold: the published socket is loopback-only (checked live, off-host, via
-# curl against the LAN address), and the published-port structure itself is
-# bound to 127.0.0.1 (checked structurally, via `container inspect`).
+# to hold: the published socket does not answer on this Mac's LAN-facing
+# address (checked live, from this Mac, via curl — a binding test, not a true
+# off-host reachability test: nothing here actually probes from another
+# host), and the published-port structure itself is bound to 127.0.0.1
+# (checked structurally, via `container inspect`).
 #
 # The plan's original second check here was `net.inet.ip.forwarding == 0`.
 # On this host that sysctl reads 1 — there's a bridge100 interface and
@@ -63,12 +65,17 @@ printf '  \033[33mn/a\033[0m   net.inet.ip.forwarding=%s (informational only on 
   "$(sysctl -n net.inet.ip.forwarding 2>/dev/null || echo 'unknown')"
 
 PORTS_JSON="$(container inspect "${BROWSER_CONTAINER}" 2>/dev/null)"
-BAD_PORTS="$(printf '%s' "${PORTS_JSON}" | python3 -c '
+# First line is always "COUNT=<n>" on a successful parse (never omitted, even
+# when n=0), so an empty or renamed publishedPorts key is distinguishable
+# from "checked and clean" — a missing/empty list must FAIL, not pass by
+# default. Remaining lines (if any) are the non-loopback entries.
+PORTS_OUT="$(printf '%s' "${PORTS_JSON}" | python3 -c '
 import sys, json
 try:
     d = json.load(sys.stdin)
     c = d[0] if isinstance(d, list) else d
     ports = (c.get("configuration", {}) or {}).get("publishedPorts") or c.get("publishedPorts") or []
+    print(f"COUNT={len(ports)}")
     bad = [p for p in ports if p.get("hostAddress") != "127.0.0.1"]
     for p in bad:
         print(p)
@@ -76,12 +83,17 @@ except Exception:
     print("PARSE-ERROR")
 ' 2>/dev/null || echo "PARSE-ERROR")"
 
-if [ "${BAD_PORTS}" = "PARSE-ERROR" ]; then
+PORTS_COUNT_LINE="$(printf '%s\n' "${PORTS_OUT}" | head -1)"
+BAD_PORTS="$(printf '%s\n' "${PORTS_OUT}" | tail -n +2)"
+
+if [ "${PORTS_OUT}" = "PARSE-ERROR" ] || [ "${PORTS_COUNT_LINE}" = "PARSE-ERROR" ]; then
   bad "could not read publishedPorts from container inspect"
+elif [ "${PORTS_COUNT_LINE}" = "COUNT=0" ]; then
+  bad "publishedPorts is empty or missing — cannot verify loopback binding"
 elif [ -n "${BAD_PORTS}" ]; then
   bad "published port(s) not bound to 127.0.0.1: ${BAD_PORTS}"
 else
-  ok "all published ports are bound to hostAddress 127.0.0.1"
+  ok "all published ports (${PORTS_COUNT_LINE#COUNT=}) are bound to hostAddress 127.0.0.1"
 fi
 
 echo
@@ -99,19 +111,43 @@ try:
 except Exception:
     print("PARSE-ERROR")' 2>/dev/null || echo "PARSE-ERROR")"
 
+# MOUNTS_OK gates everything below: an unparseable or wrongly-keyed mounts
+# list must never be silently indistinguishable from "checked and clean". A
+# schema drift that renames the mounts key, or a genuinely empty mounts
+# array, both yield MOUNTS="" from the parser above — that alone must not
+# read as "nothing is mounted". So this asserts the expected mount is
+# PRESENT as its own fact, separate from "nothing unexpected is present";
+# either one failing is a real FAIL, not a fall-through pass.
+MOUNT_PRESENT=0
 if [ "${MOUNTS}" = "PARSE-ERROR" ]; then
   bad "could not read mounts from container inspect"
+  MOUNTS_OK=0
 else
+  MOUNTS_OK=1
+  if printf '%s\n' "${MOUNTS}" | grep -qxF "${BROWSER_DATA_DIR}"; then
+    ok "browser profile dir (${BROWSER_DATA_DIR}) is mounted"
+    MOUNT_PRESENT=1
+  else
+    bad "browser profile dir (${BROWSER_DATA_DIR}) is NOT among the mounts — expected mount missing"
+  fi
   UNEXPECTED="$(printf '%s\n' "${MOUNTS}" | grep -v "^${BROWSER_DATA_DIR}$" | grep -v '^$' || true)"
   if [ -n "${UNEXPECTED}" ]; then
     bad "unexpected mounts: ${UNEXPECTED}"
   else
-    ok "only mount is the browser profile dir"
+    ok "no mounts beyond the browser profile dir"
   fi
 fi
 
+# These must only score when the mounts list is BOTH parseable AND proven to
+# be the right list — proven by MOUNT_PRESENT, i.e. having actually found the
+# one mount we know must be there. A renamed/misread key parses cleanly to an
+# empty MOUNTS, which would otherwise be indistinguishable from "read the
+# real list and it's clean". Gating on MOUNT_PRESENT closes that: garbage or
+# a wrong-key read can never produce a green "not mounted" for any secret.
 for secret in "${VAULT}" "${BEAR_DIR}" "${HOME}/.ssh" "${HOME}/.claude" "${HOME}/Library/Keychains"; do
-  if printf '%s\n' "${MOUNTS}" | grep -qF "${secret}"; then
+  if [ "${MOUNT_PRESENT}" != "1" ]; then
+    printf '  \033[33mn/a\033[0m   not mounted: %s — could not verify, mounts list unreadable or unrecognized\n' "$(basename "${secret}")"
+  elif printf '%s\n' "${MOUNTS}" | grep -qF "${secret}"; then
     bad "SECRET MOUNTED INTO THE BROWSER: ${secret}"
   else
     ok "not mounted: $(basename "${secret}")"
@@ -125,12 +161,23 @@ echo "--- the browser must not be able to read the host filesystem"
 # image, so seeing this user's home directory listed there would mean a mount
 # is exposing the host — the one thing a future "just one more --mount" would
 # silently do.
-if agent-browser connect "http://127.0.0.1:${BROWSER_CDP_PORT}" >/dev/null 2>&1 \
-   && agent-browser open "file:///Users/" >/dev/null 2>&1 \
-   && agent-browser get text 2>/dev/null | grep -qF "$(basename "${HOME}")"; then
-  bad "browser can see the host filesystem through file:///Users/"
+# ok is reserved for the case that actually proves the property: the page
+# genuinely loaded and its text genuinely did not contain the host home
+# directory's name. A failed connect or a failed navigation (e.g. Chromium
+# refusing file:///Users/ with net::ERR_FILE_NOT_FOUND because the path
+# doesn't exist inside the container) is suggestive but not the same fact —
+# it means the probe was inconclusive, not that it passed, so it prints n/a.
+if ! agent-browser connect "http://127.0.0.1:${BROWSER_CDP_PORT}" >/dev/null 2>&1; then
+  printf '  \033[33mn/a\033[0m   could not connect to CDP — file:// probe inconclusive\n'
+elif ! agent-browser open "file:///Users/" >/dev/null 2>&1; then
+  printf '  \033[33mn/a\033[0m   file:///Users/ navigation failed — did not genuinely load, probe inconclusive\n'
 else
-  ok "host filesystem not visible through file://"
+  PAGE_TEXT="$(agent-browser get text body 2>/dev/null || true)"
+  if printf '%s' "${PAGE_TEXT}" | grep -qF "$(basename "${HOME}")"; then
+    bad "browser can see the host filesystem through file:///Users/"
+  else
+    ok "page loaded and host filesystem not visible through file:///Users/"
+  fi
 fi
 
 echo
@@ -139,12 +186,29 @@ echo "--- a wedged browser must mean 'no browser', not 'an unconfined browser'"
 # answers. The AGENT's profile denies that exec — assert it still does, without
 # stopping the browser.
 AGENT_PROFILE="${GEN_DIR}/sbx-agent-1.sb"
+CHROME_BIN="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 if [ ! -f "${AGENT_PROFILE}" ]; then
   printf '  \033[33mn/a\033[0m   %s not rendered — run ./sbx-start.sh first\n' "${AGENT_PROFILE}"
-elif sandbox-exec -f "${AGENT_PROFILE}" "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --version >/dev/null 2>&1; then
-  bad "agent profile can exec Google Chrome — the fallback path is open"
+elif [ ! -x "${CHROME_BIN}" ]; then
+  # Google Chrome isn't installed at all here, so exec would fail with
+  # "No such file or directory" regardless of the profile — that is not
+  # evidence the sandbox denies anything, so this must not score as ok.
+  printf '  \033[33mn/a\033[0m   Google Chrome not installed — cannot verify exec denial\n'
 else
-  ok "agent profile still denies exec of /Applications/Google Chrome"
+  # sandbox-exec exits 71 both when the profile denies the exec AND when the
+  # binary is simply missing — exit status alone can't tell them apart.
+  # Discriminate on stderr: Seatbelt's denial reads
+  # "...failed: Operation not permitted"; a missing binary instead reads
+  # "...failed: No such file or directory".
+  CHROME_ERR="$(sandbox-exec -f "${AGENT_PROFILE}" "${CHROME_BIN}" --version 2>&1 >/dev/null)"
+  CHROME_STATUS=$?
+  if [ "${CHROME_STATUS}" -eq 0 ]; then
+    bad "agent profile can exec Google Chrome — the fallback path is open"
+  elif printf '%s' "${CHROME_ERR}" | grep -qi "Operation not permitted"; then
+    ok "agent profile still denies exec of /Applications/Google Chrome"
+  else
+    bad "Google Chrome exec failed for a reason other than sandbox denial (exit ${CHROME_STATUS}): ${CHROME_ERR}"
+  fi
 fi
 
 echo
