@@ -1163,3 +1163,103 @@ bind-mounted profile directory. Not root-caused further here; worth knowing
 if `KeepAlive` ever has to cycle this job repeatedly in a short window in
 production, since a 100s+ gap before `Chrome ready` is a long way from
 "self-healing in seconds."
+
+## Task 5 — bot-detection scores for the containerized browser (2026-08-01)
+
+`verify-detection.sh` drives the *live fleet* browser
+(`com.brianlow.claude-sbx.browser`, currently the container, CDP on 9222) over
+`agent-browser`, not a one-off `cloaktest` invocation. Full captured output is
+in `.superpowers/sdd/2026-08-01-containerized-stealth-browser/task-5-report.md`.
+
+### Finding the macOS baseline (this was not a single number to look up)
+
+There is **no full sannysoft/incolumitas score table for the native macOS
+build** anywhere in this file — that was checked directly (`grep -n
+'sannysoft\|incolumitas\|/56\|/36'`) before writing anything down. The
+`56/56` / `35/36` / Rebrowser / CreepJS numbers that appear above under
+"Browser in a container — Phase 0" are the **container's own** `cloaktest`
+run, already flagged in that section as informational, not a macOS number.
+
+What macOS *does* have on record, under "CloakBrowser — built" above, is
+narrower but load-bearing:
+
+- **WebGL must work; the GPU need not be real.** Without GPU IOKit grants,
+  sannysoft reported `WebGL Vendor: Canvas has no webgl context` — a real
+  failure. With `IOSurfaceRootUserClient`/`AGXDeviceUserClient` granted it
+  became a working context reporting `ANGLE (Apple, ANGLE Metal Renderer:
+  Apple M1 Pro)` — and forced onto SwiftShader software rendering on the same
+  M1 Pro host, CloakBrowser instead reported `ANGLE (Apple, ANGLE Metal
+  Renderer: Apple M2 Max)`, a fabricated string with no SwiftShader/llvmpipe
+  tell leaking through.
+- The qualitative claim "a live agent inside its own sandbox drives
+  CloakBrowser inside a different sandbox, **and passes bot detection**" (no
+  itemized score attached).
+- No `navigator.webdriver` value was ever recorded for the macOS build.
+
+So the comparison below is against *that* — a working-vs-broken WebGL
+context and a fabricated-but-plausible renderer string — not a numeric
+sannysoft/incolumitas delta, because macOS never had one recorded.
+
+### Container results (headless, the committed configuration)
+
+```
+=== environment
+  userAgent   : Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36
+  platform    : Win32
+  webdriver   : false
+  cores/mem   : 8 / 8
+  screen      : 1920x1080
+
+=== WebGL
+Google Inc. (NVIDIA) | ANGLE (NVIDIA, NVIDIA GeForce RTX 5080 Laptop GPU (0x00002C19) Direct3D11 vs_5_0 ps_5_0, D3D11)
+
+=== incolumitas (bot.incolumitas.com #detection-tests)
+intoli: 6/6 OK (userAgent, webDriver, webDriverAdvanced, pluginsLength, pluginArray, languages)
+fpscanner: 19/20 OK, 1 FAIL (WEBDRIVER)
+total: 26/27 OK
+
+=== sannysoft (bot.sannysoft.com)
+58 table rows, all "ok"/"passed"/plain informational — no red/FAIL rows found
+in either the first 25 rows or the remaining 33
+```
+
+The WebGL string is byte-for-byte the same fabricated `RTX 5080 Laptop GPU`
+renderer the "Browser in a container — Phase 0" section recorded weeks
+earlier for the bare image — confirming the fingerprint survived being wired
+into the fleet (launchd job, `sh -c "touch /run/.containerenv && exec
+cloakserve ..."` wrapper, port republish) intact.
+
+The lone incolumitas failure (`fpscanner.WEBDRIVER`) is the same test that
+Phase 0's `cloaktest` run flagged as `35/36` — one failure, and
+`navigator.webdriver` reads `false` directly, so this is the known
+false-positive in that specific probe, not a real webdriver leak. No other
+suite reported a failure.
+
+### Headed mode (Step 3) — not attempted
+
+The brief offers `--headless=false` as a remedy "if anything fails." Nothing
+did: `webdriver` false, WebGL a working context with a plausible fabricated
+string, sannysoft clean, incolumitas 26/27 with the one known false positive.
+Editing `sbx-browser-run.sh` and cycling the fleet job for a remedy the
+results don't call for would cost RAM and restart time (see the 60-115s
+"Chrome ready" gap noted above) for no evidenced gain, so headed mode was not
+tried and the file was not touched.
+
+### Verdict: no worse than the macOS baseline — the one thing macOS had recorded, WebGL fabrication, is intact in the container
+
+- `navigator.webdriver` is `false` — never regressed, and now recorded for the
+  first time on either platform.
+- WebGL is a **working** context with a plausible, fabricated GPU string —
+  the exact property macOS was shown to require (a missing context is itself
+  the tell) — and it survived unchanged from the bare-image Phase 0 spike
+  into the live fleet job.
+- sannysoft and incolumitas both come back clean modulo one known
+  false-positive test, matching what the container's own `cloaktest` run
+  found independently in Phase 0.
+- **Nothing regressed.** The only asterisk is that macOS never had a
+  comparable full-suite number recorded to regress *from* — the real,
+  provable continuity is the WebGL finding, and that one holds.
+
+Restated per this task's scope: these are synthetic-suite scores, which
+measure the fingerprint, not whether a real retailer serves a logged-in
+session a product page. That is Task 8's job, and a human's.
