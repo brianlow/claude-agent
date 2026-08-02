@@ -1192,8 +1192,9 @@ production, since a 100s+ gap before `Chrome ready` is a long way from
 
 `verify-detection.sh` drives the *live fleet* browser
 (`com.brianlow.claude-sbx.browser`, currently the container, CDP on 9222) over
-`agent-browser`, not a one-off `cloaktest` invocation. Full captured output is
-in `.superpowers/sdd/2026-08-01-containerized-stealth-browser/task-5-report.md`.
+`agent-browser`, not a one-off `cloaktest` invocation. The captured output is
+reproduced in full under "Container results" below — this file is the record;
+there is no separate report to go and find.
 
 ### Finding the macOS baseline (this was not a single number to look up)
 

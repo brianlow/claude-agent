@@ -201,7 +201,7 @@ sandbox-exec-prototype/
   probe.sh                 `claude -p` under a profile + every Seatbelt denial
   probe-chromium.sh        headless Chromium under a profile + denials
   verify.sh                the security assertions (Phase 1 step 5) — 17 checks
-  verify-browser.sh        the browser container's assertions — 11 checks
+  verify-browser.sh        the browser container's assertions — 12 checks
   verify-detection.sh      bot-detection scores (sannysoft / incolumitas) against the live browser job
 
   # fleet (launchd)
@@ -215,7 +215,10 @@ sandbox-exec-prototype/
 
   generated/               rendered per-agent profiles   (gitignored)
   launchd/                 rendered plists               (gitignored)
-  browser-profile/         bind-mounted browser data dir; ephemeral except the fingerprint seed (gitignored)
+  browser-profile/         bind-mounted browser data dir; fully ephemeral — cookies/localStorage do not
+                           survive a container restart. The fingerprint seed that keeps the device
+                           stable across restarts is config in fleet-common.sh, not state in here.
+                           (gitignored)
   scratch/ logs/           spike working dirs            (gitignored)
 ```
 
@@ -271,10 +274,24 @@ no LaunchServices or WindowServer to grant in the first place, which is what
 made the container the actual fix rather than a workaround. Read "Browser in a
 container" in NOTES.md before touching the browser job; the split is still
 load-bearing, and the reason it is safe is unchanged: **launchd owns the
-browser's command line, not the agent** — a hostile session operator cannot
-add `--allow-file-access`, repoint the profile dir, add a mount, or load an
-extension, and CDP has no verb that spawns a process. The browser holds
-nothing of value.
+browser's command line, not the agent.** Stated precisely, because an earlier
+draft of this paragraph overclaimed it:
+
+- **Structurally fixed** — literal argv elements in `sbx-browser-run.sh`: the
+  image reference, the single `--mount`, the `--publish` host address
+  `127.0.0.1`, and `cloakserve`'s flag list. A hostile session operator cannot
+  add `--allow-file-access`, repoint the profile dir, add a mount, load an
+  extension, or move CDP off loopback.
+- **Operator-influenceable** — the browser plist has no `EnvironmentVariables`
+  dict, so the job inherits the launchd gui-domain environment, and
+  `launchctl setenv` is reachable from inside the agent's Seatbelt profile.
+  `BROWSER_FINGERPRINT` and `BROWSER_CDP_PORT` read from that environment. Each
+  is passed as one fully-quoted argv element (the seed via `--env`,
+  dereferenced by name *inside* the container, never spliced into the `sh -c`
+  string), so the most either can do is change its own value: a different seed,
+  or a different loopback port. Neither can grow the argv.
+
+CDP has no verb that spawns a process, and the browser holds nothing of value.
 
 Ground rule still in force: **nothing outside `sandbox-exec-prototype/` gets
 modified** — not `entrypoint.sh`, `agent-run.sh`, `common.sh`, `Dockerfile`,

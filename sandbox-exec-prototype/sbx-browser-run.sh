@@ -15,10 +15,29 @@
 # is gone. That is the entire point of this job's existence in this form.
 #
 # THE AGENT DOES NOT LAUNCH THIS, and that is a security property rather than a
-# packaging accident: launchd owns this command line, so a hostile session
-# operator cannot add --allow-file-access, repoint --data-dir, add a --mount, or
-# load an extension. The agent's only reach is CDP on loopback, and CDP has no
-# verb that spawns a process.
+# packaging accident. State precisely what launchd owning this job buys, because
+# an earlier version of this comment overclaimed it:
+#
+#   STRUCTURALLY FIXED — literal argv elements written in this file, which no
+#   environment variable and no shell metacharacter can add to or alter: the
+#   image reference, the single --mount (both source and target), the --publish
+#   HOST ADDRESS 127.0.0.1, the resource limits, and the flag list handed to
+#   cloakserve. A hostile session operator therefore cannot add
+#   --allow-file-access, repoint the profile dir at $HOME, add a second --mount,
+#   append a --load-extension, or move CDP off loopback.
+#
+#   NOT FIXED — the browser plist carries no EnvironmentVariables dict, so this
+#   job inherits the launchd gui-domain environment, and `launchctl setenv` is
+#   reachable from inside the agent's Seatbelt profile. Two values in
+#   fleet-common.sh read from that environment: BROWSER_FINGERPRINT and
+#   BROWSER_CDP_PORT. Each is passed as ONE fully-quoted argv element — the seed
+#   via --env, dereferenced by NAME inside the container, never interpolated
+#   into the `sh -c` string — so the most either can do is change its own value:
+#   a different fingerprint seed, or a different loopback port. Neither can grow
+#   the argv, and neither reaches the host address, the mount, or the image.
+#
+# The agent's only other reach is CDP on loopback, and CDP has no verb that
+# spawns a process.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/fleet-common.sh"
@@ -55,6 +74,17 @@ echo "  seed      : ${BROWSER_FINGERPRINT}"
 #   repeats on EVERY container start, and a KeepAlive crash loop would re-pull it
 #   every 30s. It also means the pinned image tag would not actually pin the
 #   browser binary in use. false makes the tag mean what it says.
+#   verify-browser.sh asserts this variable is present on the RUNNING container,
+#   because deleting it breaks nothing that any other check can see.
+# --env BROWSER_FINGERPRINT=...  the seed travels as DATA, not as text spliced
+#   into a command string. It is env-overridable (fleet-common.sh) and this job
+#   inherits the gui-domain environment, so interpolating it into the `sh -c`
+#   body below — which is what this script used to do — let anyone who can call
+#   `launchctl setenv` inject shell metacharacters into the container's command
+#   line. As an --env value it is one opaque argv element; the `sh -c` body
+#   below is SINGLE-quoted and dereferences "${BROWSER_FINGERPRINT}" by name
+#   inside the container, so a value containing `;`, `&&`, or a quote is passed
+#   to cloakserve verbatim as one argument and executes nothing.
 # no -d  foreground, so launchd tracks the process lifetime and KeepAlive works.
 # no caffeinate  the agent job already holds the Mac awake; a browser with no
 #   agent driving it has no reason to prevent sleep.
@@ -79,5 +109,6 @@ exec container run \
   --memory 4g \
   --cpus 2 \
   --env CLOAKBROWSER_AUTO_UPDATE=false \
+  --env "BROWSER_FINGERPRINT=${BROWSER_FINGERPRINT}" \
   "${BROWSER_IMAGE}" \
-  sh -c "touch /run/.containerenv && exec cloakserve --data-dir=/profile --fingerprint=${BROWSER_FINGERPRINT}"
+  sh -c 'touch /run/.containerenv && exec cloakserve --data-dir=/profile --fingerprint="${BROWSER_FINGERPRINT}"'

@@ -40,9 +40,8 @@ echo
 echo "=== incolumitas bot detection (scores near 1.0 are good)"
 agent-browser open "https://bot.incolumitas.com/" >/dev/null
 # The suite runs its tests asynchronously after load. The brief's 25s minimum
-# was not enough on this machine on the first attempt (see deviation note in
-# task-5-report.md) — poll instead of a single fixed sleep, so a slow run
-# doesn't get recorded half-finished.
+# was not enough on this machine on the first attempt — poll instead of a
+# single fixed sleep, so a slow run doesn't get recorded half-finished.
 #
 # NOTE: this is a text-LENGTH check, not a DOM-settled check — a
 # still-rendering page whose text happens to be the same length on two

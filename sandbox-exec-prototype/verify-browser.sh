@@ -13,7 +13,10 @@
 #      and it gets two checks, not one.
 #   2. The container must hold nothing of value. The old profile's value was in
 #      what it did NOT grant; the container's value is in what is NOT mounted.
-#   3. A wedged browser must mean "no browser", never "an unconfined browser".
+#   3. The pinned image tag must actually pin the browser binary. That depends
+#      on one env var suppressing cloakserve's self-update; delete it and every
+#      other check here still passes while the running Chromium drifts.
+#   4. A wedged browser must mean "no browser", never "an unconfined browser".
 #      agent-browser falls back to launching /Applications/Google Chrome when
 #      no CDP port answers; the AGENT's profile denies that exec, and that
 #      denial is what makes the failure mode safe.
@@ -153,6 +156,62 @@ for secret in "${VAULT}" "${BEAR_DIR}" "${HOME}/.ssh" "${HOME}/.claude" "${HOME}
     ok "not mounted: $(basename "${secret}")"
   fi
 done
+
+echo
+echo "--- the pinned image tag must actually pin the browser binary"
+# --env CLOAKBROWSER_AUTO_UPDATE=false is the ONLY thing stopping cloakserve
+# from fetching a newer Chromium (~198MB) from GitHub on every start into the
+# UNMOUNTED /root/.cloakbrowser. Drop it and nothing else in this file changes
+# colour — CDP still answers, the mounts are still clean, the ports are still
+# loopback — while the browser actually in use silently stops being the one
+# ${BROWSER_IMAGE} ships. So it is asserted here, against the RUNNING
+# container's own environment rather than against the source of this repo.
+#
+# Same fail-closed contract as the publishedPorts check above, for the same
+# reason it was written that way: the parser emits "COUNT=<n>" as its first
+# line on ANY successful read (never omitted, even at n=0), so "the
+# environment list is missing, renamed, or empty" stays distinguishable from
+# "read the real list and the value is right". Anything unreadable is a FAIL.
+# Line 2, when present, is the variable's value.
+ENV_OUT="$(container inspect "${BROWSER_CONTAINER}" 2>/dev/null | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    c = d[0] if isinstance(d, list) else d
+    env = ((c.get("configuration", {}) or {}).get("initProcess", {}) or {}).get("environment")
+    if env is None:
+        raise KeyError("configuration.initProcess.environment")
+    print(f"COUNT={len(env)}")
+    for e in env:
+        k, sep, v = str(e).partition("=")
+        if k == "CLOAKBROWSER_AUTO_UPDATE" and sep:
+            print(v)
+            break
+except Exception:
+    print("PARSE-ERROR")
+' 2>/dev/null || echo "PARSE-ERROR")"
+
+ENV_COUNT_LINE="$(printf '%s\n' "${ENV_OUT}" | head -1)"
+ENV_VALUE="$(printf '%s\n' "${ENV_OUT}" | tail -n +2 | head -1)"
+# Anything that is not a well-formed COUNT= line is unreadable, full stop —
+# including empty output, a python crash, or a future `container inspect` that
+# prints something else entirely.
+case "${ENV_COUNT_LINE}" in
+  COUNT=*) ;;
+  *) ENV_COUNT_LINE="PARSE-ERROR" ;;
+esac
+
+if [ "${ENV_COUNT_LINE}" = "PARSE-ERROR" ]; then
+  bad "could not read initProcess.environment from container inspect — CLOAKBROWSER_AUTO_UPDATE unverifiable"
+elif [ "${ENV_COUNT_LINE}" = "COUNT=0" ]; then
+  bad "initProcess.environment is empty or missing — cannot verify CLOAKBROWSER_AUTO_UPDATE"
+elif [ -z "${ENV_VALUE}" ]; then
+  bad "CLOAKBROWSER_AUTO_UPDATE is not set on the running container — ${BROWSER_IMAGE} no longer pins the browser binary"
+elif [ "${ENV_VALUE}" != "false" ]; then
+  bad "CLOAKBROWSER_AUTO_UPDATE=${ENV_VALUE} (expected false) — the browser can self-update away from ${BROWSER_IMAGE}"
+else
+  ok "CLOAKBROWSER_AUTO_UPDATE=false on the running container — self-update suppressed, image tag pins the binary"
+fi
 
 echo
 echo "--- the browser must not be able to read the host filesystem"

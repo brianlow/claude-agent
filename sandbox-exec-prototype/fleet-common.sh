@@ -60,9 +60,22 @@ export PATH="${HOME}/.asdf/shims:${HOME}/.asdf/bin:/opt/homebrew/bin:/usr/local/
 # no WindowServer to grant, so the capability is gone rather than relocated.
 #
 # What is deliberately unchanged: launchd owns the browser's command line, not
-# the agent. A hostile session operator cannot add --allow-file-access, repoint
-# the profile dir, load an extension, or add a mount. The agent's only reach is
-# CDP, and CDP has no verb that spawns a process.
+# the agent. Precisely — and this comment used to overclaim it — the image
+# reference, the single --mount, the --publish HOST ADDRESS 127.0.0.1, and
+# cloakserve's flag list are literal argv elements in sbx-browser-run.sh, so a
+# hostile session operator cannot add --allow-file-access, repoint the profile
+# dir, load an extension, add a mount, or move CDP off loopback.
+#
+# The two values below that read from the environment (BROWSER_CDP_PORT,
+# BROWSER_FINGERPRINT) ARE operator-influenceable: the browser plist has no
+# EnvironmentVariables dict, so the job inherits the gui-domain environment and
+# `launchctl setenv` is reachable from inside the agent's profile. Each is
+# passed as one fully-quoted argv element (the seed via --env, dereferenced by
+# name inside the container), so the most either can do is change its own
+# value — a different seed, or a different LOOPBACK port. Neither can grow the
+# argv. See the long comment in sbx-browser-run.sh.
+#
+# The agent's only other reach is CDP, and CDP has no verb that spawns a process.
 BROWSER_IMAGE="cloakhq/cloakbrowser:0.5.3"     # pinned; :latest would change the browser under us
 BROWSER_CONTAINER="sbx-browser"
 BROWSER_DATA_DIR="${SBX_DIR}/browser-profile"  # in-repo and gitignored, so browser state is local to the project
@@ -73,9 +86,22 @@ BROWSER_DATA_DIR="${SBX_DIR}/browser-profile"  # in-repo and gitignored, so brow
 BROWSER_CDP_PORT="${BROWSER_CDP_PORT:-9222}"
 
 # A pinned fingerprint seed. Without one, CloakBrowser generates a random
-# identity at every startup — so a launchd restart would make the same cookie
-# jar arrive on the same site wearing a different device. Cookies and identity
-# have to agree; this is what makes the persistent profile coherent.
+# identity at every startup, so every launchd restart would present a brand-new
+# device to the same sites. The seed is what keeps the DEVICE stable across
+# restarts.
+#
+# It does NOT make anything persist, and an earlier version of this comment
+# wrongly implied it did: the browser profile is EPHEMERAL. Cookies and
+# localStorage do not survive a container restart under --data-dir=/profile,
+# nor under the --user-data-dir=/profile/chrome fallback (cloakserve swallows
+# that flag) — both tested live; see "Q2 re-tested" in NOTES.md. So the device
+# stays stable while the session resets, and anything that depends on staying
+# logged in across a browser-job restart will silently log out. That gap is
+# accepted deliberately, not overlooked.
+#
+# Env-overridable, and this job inherits the gui-domain environment — so it is
+# handed to the container via --env and must NEVER be interpolated into a shell
+# command string. See sbx-browser-run.sh.
 BROWSER_FINGERPRINT="${BROWSER_FINGERPRINT:-41337}"
 
 browser_label() { printf '%s.browser' "${LABEL_PREFIX}"; }
