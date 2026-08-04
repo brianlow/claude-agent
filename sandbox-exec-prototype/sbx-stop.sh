@@ -7,6 +7,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/sbx-common.sh"
 
+# Watcher first, or it would helpfully restart the agents being torn down.
+if is_loaded_label "$(bridge_watcher_label)"; then
+  echo "bridge-watcher: booting out..."
+  launchctl bootout "${GUI_DOMAIN}/$(bridge_watcher_label)" \
+    || echo "bridge-watcher: WARNING — bootout failed."
+else
+  echo "bridge-watcher: not loaded."
+fi
+
 for n in "${AGENTS[@]}"; do
   label="$(label_for "$n")"
   if is_loaded "$n"; then

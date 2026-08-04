@@ -133,6 +133,41 @@ BROWSER_FINGERPRINT="${BROWSER_FINGERPRINT:-41337}"
 browser_label() { printf '%s.browser' "${LABEL_PREFIX}"; }
 browser_plist() { printf '%s/%s.plist' "${PLIST_DIR}" "$(browser_label)"; }
 
+# --- bridge watcher ----------------------------------------------------------
+# Recycles an agent whose remote-control bridge has died. KeepAlive cannot: a
+# dead bridge leaves the process running, so launchd sees a healthy job. See the
+# header of sbx-bridge-watcher.sh.
+BRIDGE_WATCH_INTERVAL="${BRIDGE_WATCH_INTERVAL:-60}"
+
+bridge_watcher_label() { printf '%s.bridge-watcher' "${LABEL_PREFIX}"; }
+bridge_watcher_plist() { printf '%s/%s.plist' "${PLIST_DIR}" "$(bridge_watcher_label)"; }
+
+render_bridge_watcher_plist() {
+  local label log
+  label="$(bridge_watcher_label)"
+  log="${LOG_DIR}/bridge-watcher.log"
+  cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>${label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${SBX_DIR}/sbx-bridge-watcher.sh</string>
+    </array>
+    <!-- StartInterval, not KeepAlive: this is a one-shot poller that exits.
+         KeepAlive would respawn it in a tight loop. -->
+    <key>StartInterval</key><integer>${BRIDGE_WATCH_INTERVAL}</integer>
+    <key>RunAtLoad</key><true/>
+    <key>WorkingDirectory</key><string>${SBX_DIR}</string>
+    <key>StandardOutPath</key><string>${log}</string>
+    <key>StandardErrorPath</key><string>${log}</string>
+</dict>
+</plist>
+PLIST
+}
+
 # `container ls -q` prints one container ID per line, and --name sets the ID.
 # Matching whole lines keeps this independent of the table format.
 browser_container_running() { container ls -q 2>/dev/null | grep -qx "${BROWSER_CONTAINER}"; }
@@ -381,4 +416,6 @@ print_status() {
   done
   if is_loaded_label "$(browser_label)"; then l="loaded"; else l="not loaded"; fi
   printf '%-13s %-12s %s\n' "browser" "$l" "$(browser_state)"
+  if is_loaded_label "$(bridge_watcher_label)"; then l="loaded"; else l="not loaded"; fi
+  printf '%-13s %-12s %s\n' "bridge-watch" "$l" "every ${BRIDGE_WATCH_INTERVAL}s"
 }

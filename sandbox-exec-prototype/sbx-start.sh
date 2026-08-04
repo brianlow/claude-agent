@@ -40,6 +40,17 @@ for n in "${AGENTS[@]}"; do
   fi
 done
 
+# Bridge watcher last: it recycles agents, so it should not run while they are
+# still being bootstrapped.
+render_bridge_watcher_plist > "$(bridge_watcher_plist)"
+if is_loaded_label "$(bridge_watcher_label)"; then
+  echo "bridge-watcher: already loaded — leaving running."
+else
+  echo "bridge-watcher: bootstrapping..."
+  launchctl bootstrap "${GUI_DOMAIN}" "$(bridge_watcher_plist)" \
+    || echo "bridge-watcher: WARNING — bootstrap failed (see ${LOG_DIR}/bridge-watcher.log)."
+fi
+
 echo
 echo "Waiting for agents to come up..."
 deadline=$((SECONDS + 45))
