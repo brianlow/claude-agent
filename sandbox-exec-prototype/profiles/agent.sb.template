@@ -3,7 +3,21 @@
 ;; generated/sbx-agent-N.sb. Edit THIS file; the generated ones are rewritten
 ;; on every agent launch.
 ;;
-;; Placeholders: __HOME__  __VAULT__  __LOGDIR__
+;; Placeholders: __HOME__  __HOSTHOME__  __VAULT__  __LOGDIR__
+;;
+;; TWO HOMES, and confusing them is the easiest way to silently gut this file:
+;;
+;;   __HOME__      the FLEET's home, ~/.claude-sbx/home. Every WRITABLE grant
+;;                 resolves here. An agent that rewrites settings.json or the
+;;                 ccline binary rewrites the fleet's copy, which seed_fleet_home
+;;                 restores on the next launch (launchd KeepAlive, <=30s).
+;;   __HOSTHOME__  the HUMAN's home. Read/exec only, for toolchain the fleet
+;;                 borrows: asdf, the claude install, git config, Bear, gcalcli.
+;;
+;; Rule with no exceptions: every __HOME__ in a `deny` rule must be __HOSTHOME__.
+;; A deny spelled __HOME__ protects a path inside the fleet home — which is
+;; exactly where the agent is SUPPOSED to write — so it protects nothing while
+;; still reading like a backstop.
 ;;
 ;; The agent runs with --dangerously-skip-permissions on purpose. That is the
 ;; whole design: the boundary is the kernel's, not the app's, so it holds even
@@ -21,8 +35,8 @@
 ;; Anything else that ends up allowed should be a deliberate, named addition.
 ;; The denial-fixing loop that built this file can "succeed" while quietly
 ;; granting far more than intended — the fastest fix for a painful denial (npm
-;; cache, Chromium's profile dir) is often a broad (subpath "__HOME__"), which
-;; defeats the profile while still passing every functional check.
+;; cache, Chromium's profile dir) is often a broad (subpath "__HOSTHOME__"),
+;; which defeats the profile while still passing every functional check.
 ;;
 ;; TWO ESCAPES WERE FOUND HERE AND CLOSED. Both passed every filesystem and
 ;; Apple Events check at the time, so neither is theoretical:
@@ -74,15 +88,19 @@
   (subpath "/usr/sbin")
   (subpath "/usr/libexec")
   (subpath "/System")
-  (subpath "__HOME__/.local/share/claude")
+  (subpath "__HOSTHOME__/.local/share/claude")
   (subpath "/opt/homebrew")
-  (subpath "__HOME__/.asdf")
+  (subpath "__HOSTHOME__/.asdf")
   ;; denial: process-exec* ~/.claude/plugins/.../hooks/run-hook.cmd
+  ;; FLEET home: plugin hooks are executable content the agent can rewrite, and
+  ;; seed_fleet_home restores them on restart. The host's copy is denied below.
   (subpath "__HOME__/.claude")
   ;; denial: process-exec* ~/.npm/_npx/.../@playwright/mcp/cli.js
+  ;; FLEET home, and it must match the write grant on ~/.npm further down —
+  ;; npx populates the cache it then execs out of.
   (subpath "__HOME__/.npm")
   ;; Chromium + headless_shell, installed by playwright.
-  (subpath "__HOME__/Library/Caches/ms-playwright"))
+  (subpath "__HOSTHOME__/Library/Caches/ms-playwright"))
 
 (deny process-exec* (with no-log) (literal "/usr/bin/sudo"))
 
@@ -105,11 +123,11 @@
   (subpath "/usr/bin")
   (subpath "/usr/sbin")
   (subpath "/opt/homebrew")
-  (subpath "__HOME__/.asdf")
+  (subpath "__HOSTHOME__/.asdf")
   (subpath "/Library/Preferences/Logging")
   (literal "/Library/Preferences/com.apple.networkd.plist")
   ;; denial: file-read-data ~/.tool-versions (asdf version resolution)
-  (literal "__HOME__/.tool-versions")
+  (literal "__HOSTHOME__/.tool-versions")
   (literal "/dev/null")
   (literal "/dev/zero")
   (literal "/dev/random")
@@ -126,7 +144,25 @@
 (allow file-ioctl (literal "/dev/null"))
 
 ;; --- keychain / auth -------------------------------------------------------
-(allow file-read* file-write* (subpath "__HOME__/Library/Keychains"))
+;; THE KEYCHAIN IS GONE FROM THIS PROFILE. It used to be the widest grant here —
+;; read/write on the host login keychain, i.e. every secret Brian owns, not just
+;; the one the fleet needs.
+;;
+;; Claude Code needs a credential STORE, not this one: it prefers the keychain
+;; and falls back to ~/.claude/.credentials.json when the keychain is
+;; unreachable. seed_fleet_credentials() writes that file into the fleet home
+;; from the keychain item, on every launch, 0600 inside a 0700 directory.
+;;
+;; Removing it was also forced rather than merely desirable: the login keychain
+;; is located relative to $HOME, so once the fleet got its own home the keychain
+;; was unreachable regardless of what this profile said. See the long comment on
+;; seed_fleet_credentials in sbx-common.sh for the measurement.
+;;
+;; What remains below is TLS trust evaluation, not the keychain: /Library and
+;; /System/Library keychains hold the system root certificates, and the mds
+;; entry is Spotlight metadata that securityd stats on the way through. The
+;; fleet's own ~/Library/Keychains is not granted either — there is no fleet
+;; keychain to unlock, which is the point.
 (allow file-read*
   (subpath "/Library/Keychains")
   (subpath "/System/Library/Keychains")
@@ -146,7 +182,12 @@
 (allow pseudo-tty)
 
 ;; --- Claude Code's own state ----------------------------------------------
-(allow file-read* (subpath "__HOME__/.local/share/claude"))
+;; The install itself is the HOST's — read/exec, never writable, or an agent
+;; could rewrite the binary the human runs.
+(allow file-read* (subpath "__HOSTHOME__/.local/share/claude"))
+;; Everything below is the FLEET's own state, and this is the change that closes
+;; the escape: settings.json hooks and ccline/ccline are executed by the HOST's
+;; claude, unsandboxed, so these had to stop resolving to the human's home.
 (allow file-read* file-write*
   (subpath "__HOME__/.claude")
   (subpath "__HOME__/.cache/claude")
@@ -155,14 +196,18 @@
 (allow file-read* file-write*
   (regex #"^__HOME__/\.claude\.json(\.|$)"))
 
-;; `literal`, not `subpath` — see revision 02.
+;; `literal`, not `subpath` — see revision 02. The FLEET home only: this grant
+;; exists so the agent can stat its own $HOME, and $HOME is now the fleet's.
+;; The host home entry is deliberately NOT granted — Seatbelt matches on the
+;; full path, so traversal to the read-only toolchain paths above does not need
+;; it, and "every grant traces to an observed denial" applies to this one too.
 (allow file-read* (literal "__HOME__"))
-(allow file-read* (literal "__HOME__/.local/bin"))
+(allow file-read* (literal "__HOSTHOME__/.local/bin"))
 (allow file-read*
-  (literal "__HOME__/.gitconfig")
+  (literal "__HOSTHOME__/.gitconfig")
   ;; denial: file-read-data ~/.gitignore_global
-  (literal "__HOME__/.gitignore_global")
-  (subpath "__HOME__/.config/git"))
+  (literal "__HOSTHOME__/.gitignore_global")
+  (subpath "__HOSTHOME__/.config/git"))
 
 ;; ===========================================================================
 ;; TARGET ALLOW-LIST — the three things the agent is actually here to use.
@@ -173,23 +218,34 @@
   (subpath "__VAULT__"))
 
 ;; Bear — READ ONLY. Note file-read* only; no file-write* anywhere for Bear.
+;; The human's, necessarily — Bear's data is the point.
 (allow file-read*
-  (subpath "__HOME__/Library/Group Containers/9K33E3U3T4.net.shinyfrog.bear/Application Data"))
+  (subpath "__HOSTHOME__/Library/Group Containers/9K33E3U3T4.net.shinyfrog.bear/Application Data"))
 
-;; gcalcli — read/write (OAuth token refreshes in place).
-(allow file-read* file-write* (subpath "__HOME__/.gcalcli"))
+;; gcalcli — read/write (OAuth token refreshes in place). The human's, and it is
+;; credential-bearing: the fleet can read and refresh the calendar OAuth token.
+(allow file-read* file-write* (subpath "__HOSTHOME__/.gcalcli"))
 
 ;; npm cache — needed for npx-launched MCP servers.
 ;; denial: node → file-write-create ~/.npm/_cacache/tmp/...
 ;; Scoped to ~/.npm specifically. This is the exact denial where the tempting
-;; fix is a broad (subpath "__HOME__") — that would defeat the profile while
+;; fix is a broad (subpath "__HOSTHOME__") — that would defeat the profile while
 ;; still passing every functional check.
+;;
+;; FLEET home, which also closes a cache-poisoning path that was open when this
+;; resolved to the human's ~/.npm: an agent could write a malicious tarball into
+;; _cacache and the human's next `npm install` would resolve it as a cache hit.
 (allow file-read* file-write* (subpath "__HOME__/.npm"))
 
 ;; --- playwright / chromium -------------------------------------------------
 ;; Browser binaries and the profile/cache dirs Chromium needs at runtime.
+;; The HUMAN's, because this is a ~1GB browser install shared with the host and
+;; re-downloading it per-fleet would be silly. Writable, and that is a real
+;; residual: an agent can rewrite a Chromium binary the human later runs. It
+;; predates this change and is not made worse by it — flagged here rather than
+;; fixed, because the fix is a fleet-private playwright install.
 (allow file-read* file-write*
-  (subpath "__HOME__/Library/Caches/ms-playwright"))
+  (subpath "__HOSTHOME__/Library/Caches/ms-playwright"))
 
 ;; Chromium denials, non-GUI only. See the note below on what's withheld.
 ;; denial: user-preference-read com.apple.universalaccess
@@ -229,7 +285,7 @@
 ;; narrow case, not the default.
 ;;
 ;; NOTE WHAT IS *NOT* HERE. This profile used to carry
-;;   (allow file-read* process-exec* (subpath "__HOME__/.cloakbrowser"))
+;;   (allow file-read* process-exec* (subpath "__HOSTHOME__/.cloakbrowser"))
 ;; from when the browser ran natively on this Mac. It doesn't any more — it is
 ;; a Linux container, and agent-browser reaches it as a CDP client on
 ;; 127.0.0.1. The grant was verified dead (agent-browser connects, opens and
@@ -243,6 +299,10 @@
 ;; Writable because the socket has to be created here; scoped to the one dir.
 ;; Note this is where --session-name persists cookies, so treat it as
 ;; credential-bearing — same care as ~/.gcalcli.
+;;
+;; FLEET home. When this resolved to the human's ~/.agent-browser the fleet
+;; could read every browser auth state the human had saved there; now the two
+;; are separate stores and neither sees the other's cookies.
 (allow file-read* file-write* (subpath "__HOME__/.agent-browser"))
 
 ;; denial: user-preference-read org.chromium.chromium
@@ -296,8 +356,15 @@
   (global-name "com.apple.trustd.agent")
   (global-name "com.apple.cfprefsd.daemon")
   (global-name "com.apple.cfprefsd.agent")
-  (global-name "com.apple.SecurityServer")
-  (global-name "com.apple.securityd.xpc")
+  ;; NOT com.apple.SecurityServer, NOT com.apple.securityd.xpc. Both were here
+  ;; only for the keychain, which has left this profile entirely — the fleet
+  ;; authenticates from a seeded ~/.claude/.credentials.json instead. Verified
+  ;; removable: a one-shot `claude -p` under this profile still returns its
+  ;; answer with both gone, so TLS is unaffected. Trust evaluation goes through
+  ;; trustd (granted above), which is a different service.
+  ;;
+  ;; If a future denial names either of them, that is a finding worth writing
+  ;; down, not a line to quietly re-add.
   (global-name "com.apple.FSEvents")
   ;; denial: node → mach-lookup com.apple.SystemConfiguration.DNSConfiguration
   (global-name "com.apple.SystemConfiguration.DNSConfiguration"))
@@ -315,14 +382,42 @@
 ;; BACKSTOPS — last match wins, so these override anything granted above.
 ;; ===========================================================================
 
+;; EVERY PATH IN THIS SECTION IS __HOSTHOME__, WITHOUT EXCEPTION. A backstop
+;; spelled __HOME__ denies something inside the fleet home — where the agent is
+;; supposed to write — while the real path it was written to protect goes
+;; uncovered. It would still read like a backstop, which is the dangerous part.
+
 ;; Bear is read-only, permanently. Covers the entire group container, not just
 ;; Application Data.
 (deny file-write*
-  (subpath "__HOME__/Library/Group Containers/9K33E3U3T4.net.shinyfrog.bear"))
+  (subpath "__HOSTHOME__/Library/Group Containers/9K33E3U3T4.net.shinyfrog.bear"))
+
+;; The HOST's own Claude Code state. The fleet has its own home; the host's is
+;; not merely un-granted but explicitly denied, because settings.json hooks and
+;; the ccline statusline binary are executed by the HOST's claude, outside every
+;; sandbox. A writable path here is an escape that never has to break out of
+;; anything — it just leaves a command the host runs later, as the human.
+;;
+;; ~/.claude also holds 196MB of the human's own session transcripts
+;; (projects/, history.jsonl, sessions/), which the fleet has no business
+;; reading. seed_fleet_home deliberately does not copy them.
+;; The .claude.json spelling mirrors the fleet-side allow: a regex, not a
+;; literal, so the sidecars (.claude.json.backup and friends) are covered too.
+(deny file-read* file-write*
+  (subpath "__HOSTHOME__/.claude")
+  (regex #"^__HOSTHOME__/\.claude\.json(\.|$)")
+  (subpath "__HOSTHOME__/.npm"))
+
+;; The login keychain. Denied rather than merely un-granted, because this was
+;; the single widest grant in the profile and a future broad rule under
+;; __HOSTHOME__/Library must not silently restore it. The fleet authenticates
+;; from a seeded ~/.claude/.credentials.json in its own home instead.
+(deny file-read* file-write*
+  (subpath "__HOSTHOME__/Library/Keychains"))
 
 ;; Credentials and keys that nothing in the target allow-list needs. Explicit
 ;; so that a future broad rule can't silently expose them.
 (deny file-read* file-write*
-  (subpath "__HOME__/.ssh")
-  (subpath "__HOME__/.aws")
-  (subpath "__HOME__/.gnupg"))
+  (subpath "__HOSTHOME__/.ssh")
+  (subpath "__HOSTHOME__/.aws")
+  (subpath "__HOSTHOME__/.gnupg"))

@@ -56,6 +56,34 @@ mkdir -p "${LOG_DIR}" "${GEN_DIR}"
 export TERM=xterm-256color
 export COLORTERM=truecolor
 
+# The fleet's own HOME — this is what makes every writable grant in the profile
+# land outside the human's home directory. The host's ~/.claude holds two things
+# the HOST's claude executes unsandboxed (settings.json hooks, ccline/ccline),
+# so a writable path to it was an escape that never had to break out of the
+# sandbox at all. It is now denied outright in the profile.
+#
+# seed_fleet_home runs FIRST and on EVERY launch: it repopulates the fleet home
+# from the host one-way, so anything an agent rewrote is repaired here. Combined
+# with KeepAlive that bounds tampering to one restart (<=30s).
+#
+# ORDERING, all three load-bearing:
+#   - PTY_RUN / SETTINGS / AB_CONFIG (above) are ${HOME}-relative and must stay
+#     ABOVE this export. They are the agent's INPUTS, installed fresh by the
+#     host side of this script into the real ~/.claude-sbx.
+#   - The `source` of sbx-common.sh must stay above it too: CLAUDE_BIN, VAULT,
+#     LOG_DIR are expanded at source time and would otherwise move.
+#   - render_profile is called BELOW it and is NOT protected by either, because
+#     a $HOME inside a function body expands at call time. That is why it uses
+#     HOST_HOME internally. Do not "simplify" it back to $HOME.
+#
+# seed_fleet_credentials must run AFTER seed_fleet_home (which creates
+# ${FLEET_HOME}/.claude) and BEFORE the export (it reads the HOST keychain, and
+# the login keychain is located relative to $HOME — reversing these two lines
+# means it finds no keychain and the fleet comes up "Not logged in").
+seed_fleet_home
+seed_fleet_credentials
+export HOME="${FLEET_HOME}"
+
 # Re-render the profile on every launch so an edit to the template takes effect
 # on restart, and a hand-edit of the generated file never silently persists.
 render_profile "$N" > "${PROFILE}"
@@ -120,6 +148,7 @@ fi
 
 echo "$(date '+%Y-%m-%dT%H:%M:%S') starting ${SESSION}"
 echo "  profile : ${PROFILE}"
+echo "  home    : ${HOME} (fleet; host ~/.claude is denied)"
 echo "  workdir : ${VAULT}"
 echo "  claude  : ${CLAUDE_BIN} ($("${CLAUDE_BIN}" --version 2>/dev/null || echo '?'))"
 echo "  settings: ${SETTINGS} (in-app sandbox off)"
