@@ -104,6 +104,48 @@ print(t.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z', '[DEBUG] SSETransport: Conn
 run
 check "healthy log does not kick" "$(kicks)" "0"
 
+# --- Case 8: it must work under launchd's environment, not just a shell -----
+#
+# THE REGRESSION THIS EXISTS FOR. `ps -o lstart=` puts the day and month in a
+# LOCALE-DEPENDENT order, and a launchd job has no LANG:
+#
+#   LANG=en_CA.UTF-8 -> 'Tue  4 Aug 21:21:46 2026'
+#   no LANG (C)      -> 'Tue Aug  4 21:21:46 2026'
+#
+# The original watcher parsed only the first, swallowed the ValueError as
+# "healthy", and ran 714 times under launchd detecting nothing while working
+# perfectly by hand. Every other case in this file passes with a shell
+# environment inherited, so none of them could see it. `env -i` is the point.
+rm -f "${marker}" "${logdir}/agent-7-debug.log" "${state}"
+log_failure_at 5
+env -i HOME="${HOME}" \
+  SBX_BRIDGE_STATE="${state}" \
+  SBX_BRIDGE_KICK_CMD="${kickcmd}" \
+  SBX_BRIDGE_PID_CMD="${pidcmd}" \
+  SBX_BRIDGE_LOGDIR="${logdir}" \
+  SBX_BRIDGE_AGENTS="7" \
+  SBX_BRIDGE_COOLDOWN="300" \
+  SBX_BRIDGE_SKIP_CRED_CHECK=1 \
+  /bin/bash ./sbx-bridge-watcher.sh >>"${tmp}/out" 2>&1
+check "detects under launchd's bare environment" "$(kicks)" "1"
+
+# --- Case 9: an unparseable process start must be LOUD, not silently healthy -
+rm -f "${marker}" "${state}"
+badps="${tmp}/badps"
+mkdir -p "${badps}"
+printf '#!/bin/bash\necho "not a date at all"\n' > "${badps}/ps"
+chmod +x "${badps}/ps"
+out9="$(SBX_BRIDGE_PS_BIN="${badps}/ps" \
+  SBX_BRIDGE_STATE="${state}" SBX_BRIDGE_KICK_CMD="${kickcmd}" \
+  SBX_BRIDGE_PID_CMD="${pidcmd}" SBX_BRIDGE_LOGDIR="${logdir}" \
+  SBX_BRIDGE_AGENTS="7" SBX_BRIDGE_SKIP_CRED_CHECK=1 \
+  ./sbx-bridge-watcher.sh 2>&1 || true)"
+check "unparseable ps output does not kick" "$(kicks)" "0"
+case "${out9}" in
+  *"cannot parse"*) check "unparseable ps output is reported" "yes" "yes" ;;
+  *)                check "unparseable ps output is reported" "no"  "yes" ;;
+esac
+
 echo
 if [ "${fail}" -eq 0 ]; then echo "=== all bridge-watcher tests passed"; else echo "=== FAILURES"; fi
 exit "${fail}"

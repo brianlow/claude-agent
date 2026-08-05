@@ -30,7 +30,7 @@
 # Env overrides (used by test/test-sbx-bridge-watcher.sh):
 #   SBX_BRIDGE_STATE, SBX_BRIDGE_COOLDOWN, SBX_BRIDGE_KICK_CMD,
 #   SBX_BRIDGE_LOGDIR, SBX_BRIDGE_AGENTS, SBX_BRIDGE_SKIP_CRED_CHECK,
-#   SBX_BRIDGE_PID_CMD
+#   SBX_BRIDGE_PID_CMD, SBX_BRIDGE_PS_BIN
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/sbx-common.sh"
@@ -77,19 +77,50 @@ bridge_dead() {
   local pid="$1" logf="$2"
   [ -f "$logf" ] || return 1
   /usr/bin/python3 - "$pid" "$logf" <<'PY'
-import re, subprocess, sys
+import os, re, subprocess, sys
 from datetime import datetime, timezone
 
 pid, logf = sys.argv[1], sys.argv[2]
 
 # Process start time. `ps -o lstart=` is the only macOS format that carries the
 # year, which matters at a year boundary.
+#
+# LC_ALL=C is not cosmetic — lstart's field ORDER is locale-dependent, and this
+# runs under launchd where there is no LANG at all:
+#
+#   LANG=en_CA.UTF-8 -> 'Tue  4 Aug 21:21:46 2026'   (day before month)
+#   no LANG (C)      -> 'Tue Aug  4 21:21:46 2026'   (month before day)
+#
+# Pinning the locale makes the format ours to choose rather than the caller's.
+# The second format is kept as a fallback so an inherited LANG cannot break it
+# either — this must behave identically by hand and under launchd, because the
+# by-hand run is how anyone will debug it.
 try:
-    out = subprocess.run(["ps", "-o", "lstart=", "-p", pid],
+    env = dict(os.environ, LC_ALL="C")
+    # SBX_BRIDGE_PS_BIN exists so the test can feed this unparseable output and
+    # assert it is reported rather than silently treated as healthy. PATH cannot
+    # be used for that: sbx-common.sh exports a fixed PATH that wins.
+    ps_bin = os.environ.get("SBX_BRIDGE_PS_BIN", "ps")
+    out = subprocess.run([ps_bin, "-o", "lstart=", "-p", pid], env=env,
                          capture_output=True, text=True, check=True).stdout.strip()
-    started = datetime.strptime(out, "%a %d %b %H:%M:%S %Y").astimezone()
 except Exception:
-    sys.exit(1)          # no such process / unparseable — let launchd handle it
+    sys.exit(1)          # no such process — it exited, so KeepAlive has it
+
+started = None
+for fmt in ("%a %b %d %H:%M:%S %Y", "%a %d %b %H:%M:%S %Y"):
+    try:
+        started = datetime.strptime(out, fmt).astimezone()
+        break
+    except ValueError:
+        continue
+
+# A parse failure must be LOUD. Treating it as "healthy" is what let this run
+# 714 times under launchd, detecting nothing, while a by-hand run worked fine.
+# A monitor that cannot read its own input has to say so.
+if started is None:
+    sys.stderr.write("BUG: cannot parse `ps -o lstart=` output %r — "
+                     "bridge detection is disabled until this is fixed\n" % out)
+    sys.exit(2)
 
 # The three shapes a dead bridge takes in the debug log. All three appear
 # together in practice; matching any one is enough.
