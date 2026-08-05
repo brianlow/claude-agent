@@ -30,7 +30,8 @@
 # Env overrides (used by test/test-sbx-bridge-watcher.sh):
 #   SBX_BRIDGE_STATE, SBX_BRIDGE_COOLDOWN, SBX_BRIDGE_KICK_CMD,
 #   SBX_BRIDGE_LOGDIR, SBX_BRIDGE_AGENTS, SBX_BRIDGE_SKIP_CRED_CHECK,
-#   SBX_BRIDGE_PID_CMD, SBX_BRIDGE_PS_BIN
+#   SBX_BRIDGE_PID_CMD, SBX_BRIDGE_PS_BIN, SBX_BRIDGE_HOST_CRED_CMD,
+#   SBX_BRIDGE_FLEET_CRED, SBX_BRIDGE_SEED_CMD
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/sbx-common.sh"
@@ -65,6 +66,56 @@ sys.exit(0 if d.get("accessToken") and d.get("refreshToken") else 1)
     exit 0
   fi
 fi
+
+# --- one-way credential sync, host -> fleet ---------------------------------
+#
+# Has the fleet's credential drifted from the host keychain? Two ways it does:
+# the host refreshed (rotating the token and revoking the fleet's copy), or the
+# human re-logged in (minting a whole new grant). Either way the fleet is now
+# holding a dead token and every agent is unreachable.
+#
+# ONE WAY ONLY, host -> fleet, and that direction is deliberate. The reverse --
+# copying the fleet's file back into the host keychain -- would take a file that
+# a sandboxed, prompt-injectable agent can write and install it into the human's
+# credential store. An agent cannot forge a valid Anthropic token, but it can
+# write arbitrary JSON, and the host would then use it. That is the same shape
+# as the settings.json/ccline escape this fleet just closed: agent writes a
+# file, host acts on it. So the fleet is a follower, never a source.
+#
+# Compares SHA-256 of the access token. No token is printed.
+fleet_credential_stale() {
+  local host_cred fleet_cred
+  fleet_cred="${SBX_BRIDGE_FLEET_CRED:-${FLEET_HOME}/.claude/.credentials.json}"
+  if [ -n "${SBX_BRIDGE_HOST_CRED_CMD:-}" ]; then
+    host_cred="$("${SBX_BRIDGE_HOST_CRED_CMD}" 2>/dev/null || true)"
+  else
+    host_cred="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null || true)"
+  fi
+  [ -n "${host_cred}" ] || return 1
+  printf '%s' "${host_cred}" | /usr/bin/python3 -c '
+import hashlib, json, sys, os
+
+def tok(d):
+    o = (d or {}).get("claudeAiOauth", {})
+    t = o.get("accessToken") or ""
+    return hashlib.sha256(t.encode()).hexdigest() if t else ""
+
+try:
+    host = tok(json.load(sys.stdin))
+except Exception:
+    sys.exit(1)                       # unreadable host credential: not our call
+if not host:
+    sys.exit(1)                       # host itself has no token; guard handles it
+
+try:
+    with open(sys.argv[1]) as fh:
+        fleet = tok(json.load(fh))
+except Exception:
+    fleet = ""                        # missing or corrupt counts as stale
+
+sys.exit(0 if fleet != host else 1)
+' "${fleet_cred}"
+}
 
 # Is this agent's bridge dead RIGHT NOW?
 #
@@ -170,20 +221,48 @@ pid_for() {
   if [ -n "${SBX_BRIDGE_PID_CMD:-}" ]; then "${SBX_BRIDGE_PID_CMD}" "$1"; else agent_pid "$1"; fi
 }
 
+# Sync first, so a drifted credential is already repaired on disk by the time
+# the agents are recycled below and re-read it.
+#
+# The recycle is NOT optional. Claude Code reads .credentials.json ONCE at
+# startup and caches it -- measured: a session started with a dead credential
+# logs `[Bootstrap] Skipped: no usable OAuth` / `bridge not enabled`, then never
+# retries. A good credential written to disk 5+ minutes later changed nothing.
+# So writing the file heals the NEXT launch, and only the restart makes it now.
+STALE=0
+if fleet_credential_stale; then
+  STALE=1
+  echo "[$(date '+%F %T')] fleet credential differs from host keychain — re-seeding (host -> fleet)."
+  if [ -n "${SBX_BRIDGE_SEED_CMD:-}" ]; then
+    "${SBX_BRIDGE_SEED_CMD}" || echo "[$(date '+%F %T')] WARNING — seed command failed."
+  else
+    seed_fleet_credentials
+  fi
+fi
+
 for n in "${WATCH_AGENTS[@]}"; do
   pid="$(pid_for "$n" || true)"
   # No process: it exited, so KeepAlive is already relaunching it. Not our job.
   [ -n "${pid}" ] || continue
 
-  bridge_dead "${pid}" "${WATCH_LOGDIR}/agent-${n}-debug.log" || continue
+  # Two independent triggers. A stale credential is the CAUSE and shows up
+  # first; a dead bridge is the SYMPTOM and can lag by minutes, or never appear
+  # at all if the agent was relaunched into a bad credential and gave up at
+  # startup without ever having a bridge to lose.
+  if [ "${STALE}" -eq 1 ]; then
+    REASON="credential re-seeded"
+  else
+    bridge_dead "${pid}" "${WATCH_LOGDIR}/agent-${n}-debug.log" || continue
+    REASON="bridge dead"
+  fi
 
   last="$(last_kick_for "$n")"
   if [ -n "${last}" ] && [ $((now - last)) -lt "${COOLDOWN}" ]; then
-    echo "[$(date '+%F %T')] agent-${n}: bridge dead, but kicked $((now - last))s ago (cooldown ${COOLDOWN}s) — waiting."
+    echo "[$(date '+%F %T')] agent-${n}: ${REASON}, but kicked $((now - last))s ago (cooldown ${COOLDOWN}s) — waiting."
     continue
   fi
 
-  echo "[$(date '+%F %T')] agent-${n}: bridge dead (pid ${pid}) — recycling to re-seed credentials."
+  echo "[$(date '+%F %T')] agent-${n}: ${REASON} (pid ${pid}) — recycling so it re-reads the credential."
   if [ -n "${SBX_BRIDGE_KICK_CMD:-}" ]; then
     "${SBX_BRIDGE_KICK_CMD}" "$n" || echo "[$(date '+%F %T')] agent-${n}: kick command failed."
   else

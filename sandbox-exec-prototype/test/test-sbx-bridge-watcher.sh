@@ -146,6 +146,72 @@ case "${out9}" in
   *)                check "unparseable ps output is reported" "no"  "yes" ;;
 esac
 
+# --- credential sync (host -> fleet) ----------------------------------------
+#
+# Claude Code reads .credentials.json ONCE at startup and caches it -- measured:
+# a session started with a dead credential logs "[Bootstrap] Skipped: no usable
+# OAuth" and never retries, and a good credential written 5 minutes later
+# changed nothing. So a drifted credential must trigger a RECYCLE, not just a
+# file write, and it must do so even when no bridge-failure line exists (an
+# agent relaunched into a bad credential never had a bridge to lose).
+hostcred="${tmp}/hostcred.sh"
+fleetcred="${tmp}/fleet-credentials.json"
+seedcmd="${tmp}/seed-stub.sh"
+mk_cred() { printf '{"claudeAiOauth":{"accessToken":"%s","refreshToken":"r","expiresAt":1}}' "$1"; }
+printf '#!/bin/bash\ncat "%s"\n' "${tmp}/host-credentials.json" > "${hostcred}"
+printf '#!/bin/bash\ncp "%s" "%s"\necho seeded >> "%s"\n' \
+  "${tmp}/host-credentials.json" "${fleetcred}" "${tmp}/seeded" > "${seedcmd}"
+chmod +x "${hostcred}" "${seedcmd}"
+
+runsync() {
+  SBX_BRIDGE_STATE="${state}" \
+  SBX_BRIDGE_KICK_CMD="${kickcmd}" \
+  SBX_BRIDGE_PID_CMD="${pidcmd}" \
+  SBX_BRIDGE_LOGDIR="${logdir}" \
+  SBX_BRIDGE_AGENTS="7" \
+  SBX_BRIDGE_COOLDOWN="0" \
+  SBX_BRIDGE_SKIP_CRED_CHECK=1 \
+  SBX_BRIDGE_HOST_CRED_CMD="${hostcred}" \
+  SBX_BRIDGE_FLEET_CRED="${fleetcred}" \
+  SBX_BRIDGE_SEED_CMD="${seedcmd}" \
+  ./sbx-bridge-watcher.sh >>"${tmp}/out" 2>&1
+}
+
+# --- Case 10: matching credentials, healthy log -> no sync, no kick ---------
+rm -f "${marker}" "${state}" "${tmp}/seeded" "${logdir}/agent-7-debug.log"
+mk_cred AAA > "${tmp}/host-credentials.json"
+mk_cred AAA > "${fleetcred}"
+runsync
+check "matching credential does not re-seed" "$( [ -f "${tmp}/seeded" ] && echo yes || echo no )" "no"
+check "matching credential does not kick"    "$(kicks)" "0"
+
+# --- Case 11: host rotated -> re-seed AND recycle, with no failure line -----
+# This is the case the bridge-failure trigger cannot see on its own.
+rm -f "${marker}" "${state}" "${tmp}/seeded"
+mk_cred BBB > "${tmp}/host-credentials.json"
+runsync
+check "drifted credential re-seeds"          "$( [ -f "${tmp}/seeded" ] && echo yes || echo no )" "yes"
+check "drifted credential recycles agent"    "$(kicks)" "1"
+check "re-seed made fleet match host"        "$(cat "${fleetcred}")" "$(cat "${tmp}/host-credentials.json")"
+
+# --- Case 12: after the sync, the next poll is quiet ------------------------
+rm -f "${marker}" "${tmp}/seeded"
+runsync
+check "converged credential does not re-seed" "$( [ -f "${tmp}/seeded" ] && echo yes || echo no )" "no"
+check "converged credential does not kick"    "$(kicks)" "0"
+
+# --- Case 13: a husk fleet credential counts as drift ----------------------
+rm -f "${marker}" "${state}" "${tmp}/seeded"
+mk_cred "" > "${fleetcred}"
+runsync
+check "husk fleet credential re-seeds"        "$( [ -f "${tmp}/seeded" ] && echo yes || echo no )" "yes"
+check "husk fleet credential recycles"        "$(kicks)" "1"
+
+# --- Case 14: a missing fleet credential counts as drift -------------------
+rm -f "${marker}" "${state}" "${tmp}/seeded" "${fleetcred}"
+runsync
+check "missing fleet credential re-seeds"     "$( [ -f "${tmp}/seeded" ] && echo yes || echo no )" "yes"
+
 echo
 if [ "${fail}" -eq 0 ]; then echo "=== all bridge-watcher tests passed"; else echo "=== FAILURES"; fi
 exit "${fail}"
