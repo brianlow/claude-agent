@@ -212,6 +212,56 @@ rm -f "${marker}" "${state}" "${tmp}/seeded" "${fleetcred}"
 runsync
 check "missing fleet credential re-seeds"     "$( [ -f "${tmp}/seeded" ] && echo yes || echo no )" "yes"
 
+# --- session continuity ------------------------------------------------------
+# A recycle must cost seconds, not the conversation. These cover the identity
+# and naming rules; the resume itself is exercised live (see NOTES.md).
+source ./sbx-common.sh
+
+check "session uuid is stable"        "$(agent_session_uuid 3)" "$(agent_session_uuid 3)"
+check "session uuid differs per agent" \
+  "$( [ "$(agent_session_uuid 1)" = "$(agent_session_uuid 2)" ] && echo same || echo different )" "different"
+case "$(agent_session_uuid 1)" in
+  [0-9a-f]*-[0-9a-f]*-[0-9a-f]*-[0-9a-f]*-[0-9a-f]*) check "session uuid is a uuid" yes yes ;;
+  *)                                                 check "session uuid is a uuid" no  yes ;;
+esac
+check "absent transcript is not resumable" \
+  "$( agent_transcript_exists 00000000-0000-0000-0000-000000000000 && echo yes || echo no )" "no"
+
+# An empty transcript must read as absent: `--resume` on one fails, and failing
+# to launch is far worse than starting fresh.
+emptydir="${tmp}/.claude/projects/x"; mkdir -p "${emptydir}"
+: > "${emptydir}/11111111-1111-1111-1111-111111111111.jsonl"
+check "empty transcript is not resumable" \
+  "$( FLEET_HOME="${tmp}" agent_transcript_exists 11111111-1111-1111-1111-111111111111 && echo yes || echo no )" "no"
+printf '{"x":1}\n' > "${emptydir}/11111111-1111-1111-1111-111111111111.jsonl"
+check "non-empty transcript is resumable" \
+  "$( FLEET_HOME="${tmp}" agent_transcript_exists 11111111-1111-1111-1111-111111111111 && echo yes || echo no )" "yes"
+
+# Name capture: only a human-chosen name is replayed. A derived one is Claude
+# Code's own default and pinning it would freeze a name meant to float.
+sessdir="${tmp}/sessions"; namestate="${tmp}/namestate"
+mkdir -p "${sessdir}" "${namestate}" "${tmp}/.claude"
+mk_session() { printf '{"sessionId":"%s","name":"%s","nameSource":"%s"}' "$1" "$2" "$3" > "${sessdir}/$4.json"; }
+runcapture() {
+  SBX_BRIDGE_STATE="${state}" SBX_BRIDGE_KICK_CMD="${kickcmd}" SBX_BRIDGE_PID_CMD="${tmp}/nopid.sh" \
+  SBX_BRIDGE_LOGDIR="${logdir}" SBX_BRIDGE_AGENTS="3" SBX_BRIDGE_SKIP_CRED_CHECK=1 \
+  SBX_BRIDGE_HOST_CRED_CMD="${hostcred}" SBX_BRIDGE_FLEET_CRED="${fleetcred}" \
+  SBX_STATE="${namestate}" SBX_BRIDGE_SESSIONS_DIR="${sessdir}" \
+  ./sbx-bridge-watcher.sh >>"${tmp}/out" 2>&1
+}
+printf '#!/bin/bash\necho\n' > "${tmp}/nopid.sh"; chmod +x "${tmp}/nopid.sh"
+mk_cred AAA > "${tmp}/host-credentials.json"; mk_cred AAA > "${fleetcred}"
+
+mk_session "$(agent_session_uuid 3)" "brian-s-vault-42" "derived" derived
+rm -f "${namestate}/agent-3.name"; runcapture
+check "derived name is not recorded" \
+  "$( [ -f "${namestate}/agent-3.name" ] && echo yes || echo no )" "no"
+
+rm -f "${sessdir}/derived.json"
+mk_session "$(agent_session_uuid 3)" "umami-photos" "user" user
+runcapture
+check "user-chosen name is recorded" "$(cat "${namestate}/agent-3.name" 2>/dev/null)" "umami-photos"
+
 echo
 if [ "${fail}" -eq 0 ]; then echo "=== all bridge-watcher tests passed"; else echo "=== FAILURES"; fi
 exit "${fail}"

@@ -1438,3 +1438,190 @@ Chromium start, the URL must be resolved at runtime, not baked into a file.
 - **Licensing.** Recorded earlier in this file: the free binary advertises "1
   concurrent session" as a Pro upsell and does not enforce it locally. One
   Chromium per agent is deliberately five concurrent sessions.
+
+## Fleet HOME, credentials, and the OAuth collision (2026-08-03/04)
+
+PLAN.md Tasks 2, 3 and 4 landed together, and the reason they could not land
+separately is the most useful thing in this section.
+
+### The escape that was closed
+
+`~/.claude/settings.json` (hooks) and `~/.claude/ccline/ccline` (a binary) are
+executed by the **host's** Claude Code, unsandboxed, on every launch. Both were
+writable from inside the agent sandbox. That is an escape which never has to
+break out of anything — an agent just leaves a command on disk and the host
+runs it later, as the human. Fixed by giving the fleet its own `HOME`
+(`~/.claude-sbx/home`), seeded one-way on every launch, with the host's
+`~/.claude`, `~/.claude.json` and `~/.npm` explicitly denied in the profile.
+
+Two grants changed meaning as a bonus, both real: `~/.npm` is now fleet-private
+(an agent could previously poison `_cacache` against the human's next
+`npm install`), and `~/.agent-browser` is now fleet-private (the human's saved
+browser auth states were readable).
+
+### Task 2 and Task 4 are ONE change. The keychain lives under `$HOME`.
+
+The plan treated "give the fleet its own HOME" and "stop using the keychain" as
+separable, sequenced tasks. They are not:
+
+```
+HOME=/Users/brianlow                    -> keychain item FOUND
+HOME=/Users/brianlow/.claude-sbx/home   -> NOT FOUND (rc=44)
+```
+
+The login keychain is located relative to `$HOME`, so the moment the fleet got
+its own home the keychain was unreachable **regardless of what the profile
+granted**. Spelling the grant `__HOSTHOME__` to defer the change was tried and
+does nothing — the grant was never the binding constraint. Landing Task 2 alone
+produced five agents reading `Not logged in`, and that is how this was found.
+
+`sbx-verify.sh` reported `fail=0` on that broken fleet, because every property
+it asserts is a property of the *profile* and all of them held. It has no
+assertion that an agent can authenticate. Worth remembering before trusting a
+green verifier: it cannot see a fleet that is confined and useless.
+
+### Keychain: NOT required. Claude Code needs a credential store, not this one.
+
+Verified end to end. With `~/Library/Keychains` denied **and**
+`com.apple.SecurityServer` / `com.apple.securityd.xpc` removed from the
+mach-lookup list, a one-shot `claude -p` still returns its answer, so both mach
+services were there only for the keychain. TLS trust goes through `trustd`,
+which is separate and still granted.
+
+`seed_fleet_credentials()` reads the keychain item and writes it to
+`${FLEET_HOME}/.claude/.credentials.json`, 0600 inside a 0700 directory. That
+is a plaintext refresh token on disk — worse at rest than the keychain, far
+better in blast radius, and the trade is deliberate.
+
+The host's own `~/.claude/.credentials.json` is a **husk** (empty tokens, epoch
+expiry) and is deliberately NOT copied by `seed_fleet_home` — copying it would
+clobber the real credential. The husk is also the answer to a question this
+file used to list as unexplained: the container fleet seeds the same husk. It
+is not a seeding bug. **A husk is what Claude Code writes when its credential is
+revoked**, which is the collision below.
+
+### The OAuth collision: refresh tokens DO rotate
+
+The fleet holds a *copy* of a grant the host also holds. Refreshing rotates the
+refresh token, so whichever side refreshes second is revoked. Confirmed by
+fingerprint (SHA-256 prefix, never the token):
+
+```
+2026-08-03 11:33   access=3030b6b481ec  refresh=dfec56a88292  expires 19:23:40
+2026-08-04 00:07   access=99eca82b1594  refresh=fbaa2e005400  expires 04:22:51
+```
+
+Successive tokens are minted ~9h apart (n=2, so treat that as an order of
+magnitude). Every mint rotates, so expect **~2–3 collisions per day**. After a
+repair the fleet survives until the host's next refresh — a random point in the
+cycle, averaging ~4.5h, sometimes minutes.
+
+It is a **race, not a fixed loser**. On 2026-08-04 the fleet lost twice and the
+human lost once (an `auth failed` prompt on the Mac, requiring `/login`). Five
+agents refreshing against one host makes the human losing *more* likely over
+time, not less.
+
+**The Apple Container fleet was never immune, only lucky.** Same account, same
+husk, no `CLAUDE_CODE_OAUTH_TOKEN`, no `apiKeyHelper`. Tested directly with
+`HOME=~/.claude-agent/claude-home`: it reports `Not logged in` today. What
+protected it was that its agents restarted often enough that a revoked
+credential was always re-seeded within ~30s. The collision was invisible, not
+absent.
+
+### `.credentials.json` is read ONCE at startup and cached
+
+Measured, because it decides whether a sync alone can heal a running agent. It
+cannot. A session started against a dead credential logs:
+
+```
+[Bootstrap] Skipped: no usable OAuth, WIF, or API key
+[bridge:repl] Skipping: bridge not enabled
+[bridge:repl] Init returned null (precondition or session creation failed); consecutive failures: 1
+```
+
+…and never retries. A valid credential written to disk 5+ minutes later changed
+nothing: no second attempt, no reconnect, TUI still on `API Usage Billing`.
+Other Claude Code config files are re-read live; this one is not. **So a
+credential sync must be paired with a restart.**
+
+### Why the sync is one-way, host -> fleet
+
+The reverse — copying the fleet's file back into the host keychain — would take
+a file that a sandboxed, prompt-injectable agent can write and install it into
+the human's credential store. An agent cannot forge a valid Anthropic token, but
+it can write arbitrary JSON, and the host would then use it. That is the same
+shape as the `settings.json`/`ccline` escape this fleet just closed: agent
+writes a file, host acts on it. The fleet is a follower, never a source.
+
+### launchd cannot see a dead bridge — hence `sbx-bridge-watcher.sh`
+
+`KeepAlive` restarts a job that **exits**. An agent whose bridge dies does not
+exit; it sits there running and unreachable, and launchd sees a healthy job.
+Measured: agent-1 stayed up 25 hours through a bridge death and was never
+touched. This is the same blind spot README.md documents for a wedged agent,
+reached by a new cause.
+
+The watcher polls every 60s and recycles on either of two triggers:
+
+1. **Credential drift** — the fleet's access token no longer matches the host
+   keychain. This is the *cause*, appears immediately, and catches the case the
+   log trigger structurally cannot: an agent relaunched into a bad credential
+   never had a bridge to lose, so it logs no failure at all.
+2. **A bridge-failure line newer than the agent's process start.** Comparing
+   against process start is what makes it safe to poll — the debug log is
+   appended across launches, so a plain grep would re-fire forever on a failure
+   its own restart already fixed.
+
+Guards: a per-agent 300s cooldown, and a check that the host keychain holds a
+usable credential before recycling anything — if the human is logged out,
+restarting every 60s would be a storm that fixes nothing.
+
+**End-to-end proof, unprompted, in production.** The human was logged out on the
+Mac, then ran `/login`. The whole cycle, with no intervention:
+
+```
+[2026-08-04 23:08:22] host keychain has no usable credential — not recycling (fix the host login first).
+[2026-08-04 23:11:22] host keychain has no usable credential — not recycling (fix the host login first).
+   ← /login here: a new grant is minted, invalidating the fleet's copy
+[2026-08-04 23:12:23] fleet credential differs from host keychain — re-seeding (host -> fleet).
+[2026-08-04 23:12:23] agent-1: credential re-seeded (pid 61403) — recycling so it re-reads the credential.
+   ... all five ...
+```
+
+All five back on `Claude Pro`, host and fleet hashes equal, next poll silent.
+Both guard and trigger behaved correctly against a real event: it waited while
+there was nothing good to copy, then acted within 60s of there being something.
+
+### `ps -o lstart=` is locale-dependent — this cost 12 hours
+
+The watcher's first version ran 714 times under launchd detecting **nothing**,
+while a by-hand run detected every dead bridge immediately. The fleet sat
+unreachable the whole time.
+
+```
+LANG=en_CA.UTF-8 -> 'Tue  4 Aug 21:21:46 2026'   (day before month)
+no LANG (C)      -> 'Tue Aug  4 21:21:46 2026'   (month before day)
+```
+
+launchd jobs inherit no `LANG`. The `strptime` raised `ValueError`, a bare
+`except` swallowed it as "this agent is healthy", and an empty watcher log
+looked exactly like "nothing to do" when it actually meant "cannot tell".
+
+Two lessons, the second more general than the first: pin `LC_ALL=C` around any
+command whose output you parse, and **never let a monitor treat "I could not
+check" as "it is fine"** — a parse failure now writes to the log and exits 2.
+The test suite grew a case that runs the whole watcher under `env -i`, because
+every other case inherited a shell environment and none of them could see it.
+
+### What is still not fixed
+
+The sync makes the *fleet* self-healing within ~60s. It does nothing about the
+race direction: the fleet can still refresh first and revoke the human. Only
+giving the fleet its own credential removes that —
+
+- **A second Claude account.** `HOME=~/.claude-sbx/home claude` → `/login` as a
+  different account, once; then delete `seed_fleet_credentials`. Costs a
+  subscription.
+- **An API key.** `ANTHROPIC_API_KEY` in the fleet's launchd environment. Keys
+  do not expire or refresh, so the failure mode disappears rather than being
+  recovered from. Costs metered billing instead of a flat rate.

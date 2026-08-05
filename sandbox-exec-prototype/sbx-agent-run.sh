@@ -134,6 +134,29 @@ install -m 0644 "${SCRIPT_DIR}/sbx-settings.json" "${SETTINGS}"
 install -m 0644 "${SCRIPT_DIR}/sbx-agent-browser.json" "${AB_CONFIG}"
 export AGENT_BROWSER_CONFIG="${AB_CONFIG}"
 
+# --- session continuity ------------------------------------------------------
+# Restarts are ROUTINE for this fleet: the bridge watcher recycles on credential
+# rotation ~2-3x/day, and each one used to discard whatever the agent was
+# working on. Resuming a stable per-agent session makes a recycle cost a few
+# seconds instead of the conversation.
+#
+# --session-id on first run, --resume afterwards. Not `--continue`: all five
+# agents share one cwd, so "the most recent conversation here" is whichever
+# agent wrote last, and they would resume each other's work.
+SESSION_UUID="$(agent_session_uuid "$N")"
+RESUME_ARGS=(--session-id "${SESSION_UUID}")
+if agent_transcript_exists "${SESSION_UUID}"; then
+  RESUME_ARGS=(--resume "${SESSION_UUID}")
+fi
+
+# A rename in the desktop app is the human labelling what an agent is FOR, so
+# losing it on recycle is losing information. The watcher records it; replay it
+# here. Empty/missing means the derived default, which is correct for a fresh
+# agent.
+NAME_ARGS=()
+_saved_name="$(cat "$(agent_name_file "$N")" 2>/dev/null || true)"
+[ -n "${_saved_name}" ] && NAME_ARGS=(-n "${_saved_name}")
+
 [ -x "${CLAUDE_BIN}" ] || { echo "claude not executable at ${CLAUDE_BIN}" >&2; exit 1; }
 [ -d "${VAULT}" ]      || { echo "vault not found at ${VAULT}" >&2; exit 1; }
 
@@ -149,6 +172,7 @@ fi
 echo "$(date '+%Y-%m-%dT%H:%M:%S') starting ${SESSION}"
 echo "  profile : ${PROFILE}"
 echo "  home    : ${HOME} (fleet; host ~/.claude is denied)"
+echo "  session : ${RESUME_ARGS[0]} ${SESSION_UUID}${_saved_name:+ (name: ${_saved_name})}"
 echo "  workdir : ${VAULT}"
 echo "  claude  : ${CLAUDE_BIN} ($("${CLAUDE_BIN}" --version 2>/dev/null || echo '?'))"
 echo "  settings: ${SETTINGS} (in-app sandbox off)"
@@ -164,6 +188,8 @@ exec caffeinate -dims \
     --settings "${SETTINGS}" \
     --dangerously-skip-permissions \
     --permission-mode bypassPermissions \
+    "${RESUME_ARGS[@]}" \
+    ${NAME_ARGS[@]+"${NAME_ARGS[@]}"} \
     --remote-control "${SESSION}" \
     --debug \
     --debug-file "${DEBUG_LOG}"

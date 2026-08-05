@@ -31,7 +31,7 @@
 #   SBX_BRIDGE_STATE, SBX_BRIDGE_COOLDOWN, SBX_BRIDGE_KICK_CMD,
 #   SBX_BRIDGE_LOGDIR, SBX_BRIDGE_AGENTS, SBX_BRIDGE_SKIP_CRED_CHECK,
 #   SBX_BRIDGE_PID_CMD, SBX_BRIDGE_PS_BIN, SBX_BRIDGE_HOST_CRED_CMD,
-#   SBX_BRIDGE_FLEET_CRED, SBX_BRIDGE_SEED_CMD
+#   SBX_BRIDGE_FLEET_CRED, SBX_BRIDGE_SEED_CMD, SBX_BRIDGE_SESSIONS_DIR
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/sbx-common.sh"
@@ -220,6 +220,59 @@ record_kick() {
 pid_for() {
   if [ -n "${SBX_BRIDGE_PID_CMD:-}" ]; then "${SBX_BRIDGE_PID_CMD}" "$1"; else agent_pid "$1"; fi
 }
+
+# Record each agent's display name if the human has renamed it.
+#
+# A rename in the desktop app is the human labelling what an agent is FOR
+# ("umami-photos"), and a recycle would otherwise silently revert it to the
+# derived default. Claude Code writes the current name into
+# ~/.claude/sessions/<pid>.json with a `nameSource`; anything other than
+# "derived" means a human chose it, so that is what we replay on restart.
+#
+# Done on EVERY poll, not just before a kick: a crash or a launchd restart also
+# loses the name, and those do not come through this script.
+capture_agent_names() {
+  local n uuid sessdir
+  # Overridable for the test only. Deliberately NOT done by exporting
+  # FLEET_HOME: that variable decides which directory the Seatbelt profile
+  # grants write access to, so it must stay non-overridable from the
+  # environment.
+  sessdir="${SBX_BRIDGE_SESSIONS_DIR:-${FLEET_HOME}/.claude/sessions}"
+  [ -d "${sessdir}" ] || return 0
+  mkdir -p "${SBX_STATE}"
+  for n in "${WATCH_AGENTS[@]}"; do
+    uuid="$(agent_session_uuid "$n")"
+    /usr/bin/python3 - "${sessdir}" "${uuid}" "$(agent_name_file "$n")" <<'PY' || true
+import glob, json, os, sys
+sessdir, uuid, dest = sys.argv[1], sys.argv[2], sys.argv[3]
+for p in glob.glob(os.path.join(sessdir, "*.json")):
+    try:
+        with open(p) as fh:
+            d = json.load(fh)
+    except Exception:
+        continue
+    if d.get("sessionId") != uuid:
+        continue
+    name, src = d.get("name"), d.get("nameSource")
+    # "derived" is Claude Code's own default (from the cwd). Only a human-chosen
+    # name is worth preserving; recording a derived one would pin a name that
+    # should be allowed to change.
+    if name and src and src != "derived":
+        cur = ""
+        try:
+            with open(dest) as fh:
+                cur = fh.read()
+        except OSError:
+            pass
+        if cur != name:
+            with open(dest, "w") as fh:
+                fh.write(name)
+            print("recorded display name for this agent: %s" % name)
+    break
+PY
+  done
+}
+capture_agent_names
 
 # Sync first, so a drifted credential is already repaired on disk by the time
 # the agents are recycled below and re-read it.

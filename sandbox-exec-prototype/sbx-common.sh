@@ -186,6 +186,44 @@ browser_state() {
   fi
 }
 
+# --- session continuity ------------------------------------------------------
+# Small persistent state, outside the fleet home so agents cannot write it.
+SBX_STATE="${SBX_STATE:-${HOST_HOME}/.claude-sbx/state}"
+
+# A STABLE session UUID per agent, so a restart RESUMES that agent's
+# conversation instead of dropping it and starting blank. Restarts are routine
+# here -- the bridge watcher recycles on credential rotation ~2-3x/day -- and
+# without this each one silently discarded whatever the agent was mid-way
+# through, with the transcript left orphaned on disk.
+#
+# Assigned rather than discovered, and that is the point: all five agents share
+# one cwd (the vault), so `--continue` would have them all race for the same
+# "most recent conversation in this directory" and land on each other's work.
+# A per-agent UUID makes each one's session unambiguous.
+#
+# Derived from the agent number so it survives losing every state file.
+agent_session_uuid() {
+  /usr/bin/python3 -c "import uuid,sys; print(uuid.uuid5(uuid.NAMESPACE_URL,'sbx-agent-'+sys.argv[1]))" "$1"
+}
+
+# Has this session ever been written? Searched rather than reconstructing Claude
+# Code's cwd->directory encoding (slashes and apostrophes both become dashes),
+# which would silently miss on any path it encodes differently than we guess.
+#
+# `find`, not a shell glob: an unmatched glob is a hard error in zsh and a
+# literal string in bash, so the glob form behaved differently depending on who
+# sourced this file. -size +0c so a zero-length transcript is treated as absent
+# -- `--resume` on an empty file fails, and failing to launch is much worse than
+# starting a fresh session.
+agent_transcript_exists() {
+  [ -n "$(find "${FLEET_HOME}/.claude/projects" -maxdepth 2 -name "$1.jsonl" \
+            -size +0c -print -quit 2>/dev/null)" ]
+}
+
+# Where the watcher parks an agent's user-assigned display name, so a rename in
+# the desktop app survives the next recycle.
+agent_name_file() { printf '%s/agent-%s.name' "${SBX_STATE}" "$1"; }
+
 label_for()   { printf '%s.%s' "${LABEL_PREFIX}" "$1"; }
 plist_for()   { printf '%s/%s.plist' "${PLIST_DIR}" "$(label_for "$1")"; }
 profile_for() { printf '%s/sbx-agent-%s.sb' "${GEN_DIR}" "$1"; }
