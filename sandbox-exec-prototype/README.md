@@ -128,6 +128,25 @@ than the agent's process start. The restart is required, not cosmetic —
 `.credentials.json` is read once at startup and cached, so writing the file
 alone heals nothing until the process restarts.
 
+**A recycle does not cost you the conversation.** Each agent has a stable
+session UUID, so `sbx-agent-run.sh` uses `--session-id` on first launch and
+`--resume` on every launch after — the agent reattaches to its own conversation
+with context intact. Not `--continue`: all five share one cwd, so "the most
+recent conversation here" is whichever agent wrote last, and they would resume
+each other's work. If you rename an agent in the desktop app, the watcher
+records that name and replays it with `-n`, so the label survives too.
+
+Two consequences worth knowing. An agent's conversation now accumulates
+indefinitely rather than resetting on restart — Claude Code compacts as it
+goes, but a long-lived agent is a long-lived context. And to deliberately start
+one fresh, delete its transcript:
+
+```sh
+source ./sbx-common.sh
+find ~/.claude-sbx/home/.claude/projects -name "$(agent_session_uuid 3).jsonl" -delete
+launchctl kickstart -k gui/$(id -u)/com.brianlow.claude-sbx.3
+```
+
 ```sh
 tail -f ~/.claude-sbx/logs/bridge-watcher.log   # silence == everything converged
 ```

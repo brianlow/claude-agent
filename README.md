@@ -3,6 +3,30 @@ This is a container for running Claude Code with remote session on
 It is using Apple Container tech
 https://github.com/apple/container
 
+> **The running fleet is now `sandbox-exec-prototype/`, not this one.** Those
+> five agents are native macOS processes under Seatbelt rather than containers,
+> because this fleet could not pair with Remote Control. Everything below still
+> describes the container fleet, which is not running — see
+> [`sandbox-exec-prototype/README.md`](sandbox-exec-prototype/README.md) for the
+> live one.
+>
+> Three things learned there apply directly to this fleet if it is ever revived:
+>
+> - **Its `~/.claude` seed copies a husk.** `~/.claude/.credentials.json` on the
+>   host has empty tokens — that is what Claude Code writes when a credential is
+>   revoked. Tested with `HOME=~/.claude-agent/claude-home`: this fleet reports
+>   `Not logged in` today. It used to work because its agents restarted often
+>   enough to always re-seed a live token, which made the problem invisible
+>   rather than absent.
+> - **The fleet and you share one OAuth grant, and refreshing rotates it**, so
+>   whichever side refreshes second is revoked (~2–3x/day, either direction).
+> - **`KeepAlive` cannot see a dead bridge** — the process does not exit, so
+>   launchd thinks the job is healthy. `sandbox-exec-prototype/sbx-bridge-watcher.sh`
+>   is the fix; this fleet has no equivalent.
+>
+> Full write-up: `sandbox-exec-prototype/NOTES.md`, "Fleet HOME, credentials,
+> and the OAuth collision".
+
 ## Running the fleet (5 agents under launchd)
 
 Agents run detached and are reached through the Claude desktop app (remote
@@ -15,6 +39,7 @@ that crashes or idle-times-out. Startup is manual (no login auto-start).
 ./reset-agents.sh          # force-recycle all 5 now (removes containers; launchd relaunches)
 ./stop-agents.sh           # tear all 5 down + the watcher (idempotent)
 ./build.sh                 # rebuild the image without touching running agents
+./prune-images.sh          # reclaim leaked snapshots/blobs (dry run; --yes to delete)
 ```
 
 - Agents are `agent-1`..`agent-5`; the container name is also the remote-control
@@ -112,6 +137,56 @@ state lives in `~/.claude-agent/reset-last-seen`; watcher log is
 
 > One-time setup: create `Fleet Reset.md` in the vault once (it's self-documenting
 > — see the vault's `CLAUDE.md`). After that, each save recycles the fleet.
+
+## Disk usage
+
+`~/Library/Application Support/com.apple.container` grows without bound, and
+`container image prune` cannot stop it. Every `./build.sh` mints a new
+`claude-code:latest` manifest digest, but `state.json` is a flat tag→digest map
+— the old digest is *overwritten*, not left behind as a dangling `<none>`
+image. Prune looks for dangling images, finds none, and exits happy while the
+previous snapshot (~3.8GB) and its layers sit orphaned forever. This is why
+`container system df` once reported 1.79GB reclaimable against 45GB of actual
+garbage: it is blind to the leak. Seventeen builds had grown the directory to
+95GB.
+
+`./prune-images.sh` does the reachability walk the CLI won't: `state.json` →
+index → manifest → config + layers, then deletes every snapshot dir and blob
+the walk never reached. `build.sh` runs it with `--yes` after each build, so
+the leak is collected at the moment it's created. Run it by hand any time —
+it's a dry run unless you pass `--yes`.
+
+The one thing it must never get wrong: `snapshots/` contains dirs that *no
+image* references but *every container* mounts — `vminit` (the guest init
+filesystem) and the BuildKit builder. Deleting those bricks every container on
+the host. So there's a second root set, scraped from each container's
+`runtime-configuration.json`, and a guard that refuses to prune at all if
+`state.json` yields no reachable images. Both are covered by
+`test/test-prune-images.sh`.
+
+Two more sources worth knowing:
+
+- **Multi-arch pulls unpack every platform.** Pulling a multi-arch image gives
+  you an amd64 rootfs this Mac cannot execute — 3.1GB for hermes alone.
+  `build.sh` exports `CONTAINER_DEFAULT_PLATFORM=linux/arm64` to stop it;
+  `container image pull --platform linux/arm64` does the same by hand.
+- **The BuildKit cache is unbounded** and has no prune subcommand. It reached
+  7.6GB. `container builder delete` is the only lever; the builder restarts
+  itself on the next build.
+
+**Deleting files here may not free any space right away.** Time Machine local
+APFS snapshots are whole-volume and block-level — taken *before* Time Machine
+applies your exclusions — so a local snapshot pins every block you just freed,
+even though this directory is excluded from backups. Deleting 76GB can move
+`df` by zero. The space returns when the snapshot rotates (usually within 24h,
+sooner under disk pressure), or immediately via:
+
+```sh
+tmutil listlocalsnapshots /
+sudo tmutil deletelocalsnapshots com.apple.TimeMachine.<stamp>.local
+```
+
+Don't let a `df` right after a prune convince you the prune failed.
 
 ## Troubleshooting
 

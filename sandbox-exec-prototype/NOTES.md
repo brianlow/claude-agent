@@ -1625,3 +1625,61 @@ giving the fleet its own credential removes that —
 - **An API key.** `ANTHROPIC_API_KEY` in the fleet's launchd environment. Keys
   do not expire or refresh, so the failure mode disappears rather than being
   recovered from. Costs metered billing instead of a flat rate.
+
+### Session continuity — a recycle must not cost the conversation
+
+The watcher fixed an unreachable fleet and introduced a worse failure: every
+recycle silently discarded whatever the agent was mid-way through. Observed on
+2026-08-04 — a 112-message session adding photos to Umami recipes, killed at
+22:47:59 between one tool call and the next, transcript orphaned on disk with no
+route back to it from the desktop app.
+
+Fixed with a **stable per-agent session UUID** (`uuid5` of `sbx-agent-N`):
+`--session-id` on first launch, `--resume` on every launch after.
+
+**Assigned, not discovered, and that is the crux.** All five agents share one
+cwd (the vault), so `--continue` resolves to "the most recent conversation in
+this directory" — whichever agent wrote last — and the five would resume each
+other's work. Nothing in the transcript records which agent owns it, so there is
+no reliable way to discover the mapping after the fact. Assigning the ID removes
+the question.
+
+Verified before wiring it in, since three things had to hold:
+
+```
+--session-id <uuid> -p "remember PINEAPPLE-7731"   -> STORED
+--resume     <uuid> -p "what token?"               -> PINEAPPLE-7731
+--resume     <uuid> --remote-control               -> /remote-control is active,
+                                                      prior conversation restored
+```
+
+Then live: agent-1's first launch logged `--session-id`, and after a
+`launchctl kickstart -k` the next logged `--resume`, against one transcript
+carrying one `sessionId` across both launches.
+
+**Renames survive too.** A rename in the desktop app is the human labelling what
+an agent is *for*, so reverting it to the derived default loses information.
+Claude Code writes the current name to `~/.claude/sessions/<pid>.json` with a
+`nameSource`; the watcher records it when that source is anything other than
+`derived`, and `sbx-agent-run.sh` replays it with `-n`. Recorded on **every**
+poll rather than only before a kick, because a crash or a plain launchd restart
+also drops the name and neither goes through the watcher.
+
+Where the rename actually lives is only partly answered. `nameSource: derived`
+is all that has ever been observed locally, so the desktop app's rename may be
+server-side and keyed to the bridge session — in which case `-n` restores the
+local display name and the app may still show its own. Worth re-checking the
+first time a rename is made and then survives (or does not) a recycle.
+
+Two implementation details that bit:
+
+- **`find`, not a shell glob**, for locating a transcript. An unmatched glob is
+  a hard error in zsh and a literal string in bash, so the glob version behaved
+  differently depending on who sourced `sbx-common.sh`.
+- **A zero-length transcript counts as absent.** `--resume` on an empty file
+  fails, and failing to launch is far worse than starting a fresh session.
+
+**Consequence, accepted:** an agent's conversation now accumulates indefinitely
+instead of resetting on restart. Claude Code compacts as it goes, but a
+long-lived agent is a long-lived context. To reset one deliberately, delete its
+transcript and kick it.
