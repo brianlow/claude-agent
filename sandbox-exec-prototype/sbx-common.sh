@@ -344,13 +344,33 @@ PY
 #
 # A changed value after an agent has run past the access-token expiry means
 # rotation is live, and the fleet needs its own login rather than a copy.
+#
+# OPT-OUT. Seeding only makes sense while the fleet holds a COPY of the host's
+# grant. Give the fleet its own login and the copy turns harmful: this runs on
+# every agent launch, so the next restart would overwrite the fleet's
+# independent credential with the host's and put both back on one grant.
+# Touch ${HOST_HOME}/.claude-sbx/no-seed to stop it.
+#
+# A file, not an env var, because every caller is a launchd job whose
+# environment this repo does not control — see the LANG regression that made
+# the watcher blind for 714 runs.
 seed_fleet_credentials() {
   local dest="${FLEET_HOME}/.claude/.credentials.json"
   local token
-  token="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null)" || {
-    echo "WARNING: no 'Claude Code-credentials' in the host keychain — agents will not authenticate" >&2
+  local no_seed="${SBX_NO_SEED_FILE:-${HOST_HOME}/.claude-sbx/no-seed}"
+  if [ -e "${no_seed}" ]; then
+    echo "seed_fleet_credentials: ${no_seed} present — leaving the fleet's own credential alone" >&2
     return 0
-  }
+  fi
+  if [ -n "${SBX_HOST_CRED_CMD:-}" ]; then
+    token="$("${SBX_HOST_CRED_CMD}" 2>/dev/null)" || token=""
+    [ -n "${token}" ] || { echo "WARNING: host credential command produced nothing" >&2; return 0; }
+  else
+    token="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null)" || {
+      echo "WARNING: no 'Claude Code-credentials' in the host keychain — agents will not authenticate" >&2
+      return 0
+    }
+  fi
   # Reject the husk rather than overwrite a working fleet credential with it.
   printf '%s' "${token}" | /usr/bin/python3 -c '
 import json, sys

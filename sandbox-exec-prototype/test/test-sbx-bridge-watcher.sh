@@ -279,6 +279,44 @@ check "unparseable fleet expiry re-seeds"      "$( [ -f "${tmp}/seeded" ] && ech
 # and naming rules; the resume itself is exercised live (see NOTES.md).
 source ./sbx-common.sh
 
+# --- credential seeding opt-out ----------------------------------------------
+#
+# Seeding exists because the fleet holds a COPY of the host's grant. Give the
+# fleet its OWN login and the copy becomes actively harmful: sbx-agent-run.sh
+# calls seed_fleet_credentials on every launch, so the next restart would
+# overwrite the fleet's independent credential with the host's and put both
+# sides back on one grant.
+#
+# A sentinel FILE, not an env var: the callers are launchd jobs whose
+# environment this repo does not control (see the LANG regression in Case 8 --
+# `launchctl` hands a job almost nothing).
+seedhome="${tmp}/seedhome"; mkdir -p "${seedhome}/.claude"
+sentinel="${tmp}/no-seed"
+fakehost="${tmp}/fakehost.sh"
+printf '#!/bin/bash\nprintf %s\n' \
+  "'{\"claudeAiOauth\":{\"accessToken\":\"HOSTTOK\",\"refreshToken\":\"r\",\"expiresAt\":1}}'" > "${fakehost}"
+chmod +x "${fakehost}"
+
+# Control: without the sentinel, seeding still works. If this ever passes for
+# the wrong reason the test below proves nothing.
+rm -f "${sentinel}"
+printf 'FLEET-OWN-CREDENTIAL' > "${seedhome}/.claude/.credentials.json"
+FLEET_HOME="${seedhome}" SBX_HOST_CRED_CMD="${fakehost}" SBX_NO_SEED_FILE="${sentinel}" \
+  seed_fleet_credentials >/dev/null 2>&1
+check "without sentinel, seeding overwrites the fleet credential" \
+  "$(grep -c HOSTTOK "${seedhome}/.claude/.credentials.json" 2>/dev/null || echo 0)" "1"
+
+# With the sentinel present, the fleet's own credential must survive untouched.
+: > "${sentinel}"
+printf 'FLEET-OWN-CREDENTIAL' > "${seedhome}/.claude/.credentials.json"
+FLEET_HOME="${seedhome}" SBX_HOST_CRED_CMD="${fakehost}" SBX_NO_SEED_FILE="${sentinel}" \
+  seed_fleet_credentials >/dev/null 2>&1
+# Assert on a MARKER MATCH, never on file contents: `check` echoes the value it
+# got, so comparing contents dumps a live credential into the test output the
+# moment this fails. Learned the hard way while writing it.
+check "sentinel leaves the fleet credential untouched" \
+  "$(grep -c FLEET-OWN-CREDENTIAL "${seedhome}/.claude/.credentials.json" 2>/dev/null || echo 0)" "1"
+
 check "session uuid is stable"        "$(agent_session_uuid 3)" "$(agent_session_uuid 3)"
 check "session uuid differs per agent" \
   "$( [ "$(agent_session_uuid 1)" = "$(agent_session_uuid 2)" ] && echo same || echo different )" "different"
