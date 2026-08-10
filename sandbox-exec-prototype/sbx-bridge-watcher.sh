@@ -82,6 +82,26 @@ fi
 # as the settings.json/ccline escape this fleet just closed: agent writes a
 # file, host acts on it. So the fleet is a follower, never a source.
 #
+# DIFFERING IS NOT ENOUGH — the staler side must not win. Rotation makes
+# whoever refreshed LAST the authoritative holder, and that can be the fleet.
+# On 2026-08-09 it was: the fleet refreshed first, the host's keychain copy was
+# already rotated out, and this function said "differs" so the watcher copied
+# the DEAD host token over the fleet's live one and recycled all five agents
+# onto it. Proof it was the copied-in token that was dead, from a FRESHLY
+# seeded credential six minutes later:
+#
+#   [ERROR] OAuth refresh failed (expected): status code 400
+#   [ERROR] OAuth refresh token is no longer valid; run /login to re-authenticate
+#
+# So compare expiry too, and decline to overwrite a fleet credential that is
+# newer. This does not change the DIRECTION of the sync — still host -> fleet,
+# the fleet still never writes the host's keychain, and the argument above
+# stands. It only decides when copying is the right move.
+#
+# It narrows the race; it does not close it. Both sides can still refresh within
+# seconds of each other, and the loser gets 400 with nothing valid to sync from.
+# Only separate grants remove that.
+#
 # Compares SHA-256 of the access token. No token is printed.
 fleet_credential_stale() {
   local host_cred fleet_cred
@@ -93,27 +113,45 @@ fleet_credential_stale() {
   fi
   [ -n "${host_cred}" ] || return 1
   printf '%s' "${host_cred}" | /usr/bin/python3 -c '
-import hashlib, json, sys, os
+import hashlib, json, sys
 
-def tok(d):
-    o = (d or {}).get("claudeAiOauth", {})
-    t = o.get("accessToken") or ""
+def tok(o):
+    t = (o or {}).get("accessToken") or ""
     return hashlib.sha256(t.encode()).hexdigest() if t else ""
 
+def exp(o):
+    try:
+        return int((o or {}).get("expiresAt") or 0)
+    except (TypeError, ValueError):
+        return 0                      # an expiry we cannot read protects nothing
+
 try:
-    host = tok(json.load(sys.stdin))
+    host_o = json.load(sys.stdin).get("claudeAiOauth", {})
 except Exception:
     sys.exit(1)                       # unreadable host credential: not our call
+host = tok(host_o)
 if not host:
     sys.exit(1)                       # host itself has no token; guard handles it
 
 try:
     with open(sys.argv[1]) as fh:
-        fleet = tok(json.load(fh))
+        fleet_o = json.load(fh).get("claudeAiOauth", {})
 except Exception:
-    fleet = ""                        # missing or corrupt counts as stale
+    fleet_o = {}                      # missing or corrupt counts as stale
+fleet = tok(fleet_o)
 
-sys.exit(0 if fleet != host else 1)
+if fleet == host:
+    sys.exit(1)                       # converged, nothing to do
+
+# Tokens differ, so one side has rotated. Keep the LATER expiry: a fleet
+# credential that outlives the host copy is the live one, and overwriting it is
+# the 2026-08-09 outage. `if fleet` is load-bearing — a husk must always be
+# replaceable, or an agent could pin the fleet on an empty credential forever
+# just by writing a far-future expiry next to it.
+if fleet and exp(fleet_o) > exp(host_o):
+    sys.exit(1)
+
+sys.exit(0)
 ' "${fleet_cred}"
 }
 

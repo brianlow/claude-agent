@@ -212,6 +212,68 @@ rm -f "${marker}" "${state}" "${tmp}/seeded" "${fleetcred}"
 runsync
 check "missing fleet credential re-seeds"     "$( [ -f "${tmp}/seeded" ] && echo yes || echo no )" "yes"
 
+# --- expiresAt guard: a STALER host must not clobber the fleet ---------------
+#
+# THE OUTAGE THIS EXISTS FOR (2026-08-09). The fleet refreshed first, so it held
+# the only live token and the host keychain copy had already been rotated out.
+# The watcher compared tokens, saw "differs", copied the DEAD host token over
+# the live fleet one, and recycled all five agents onto it:
+#
+#   [20:16:55] fleet credential differs from host keychain — re-seeding
+#   02:16:56.741 [ERROR] OAuth refresh failed (expected): status code 400
+#   02:23:11.059 [ERROR] OAuth refresh token is no longer valid; run /login
+#
+# The second line is on a FRESHLY seeded credential, which is the proof the
+# copied-in token was itself dead. A one-sided outage became a total one.
+#
+# Direction of the sync is still host -> fleet and the fleet still never writes
+# the host's keychain (sbx-common.sh:77-83). This only decides WHEN to copy:
+# rotation makes whoever refreshed LAST authoritative, and expiresAt is how that
+# is known without printing or comparing a token.
+mk_cred_exp() { printf '{"claudeAiOauth":{"accessToken":"%s","refreshToken":"r","expiresAt":%s}}' "$1" "$2"; }
+
+# --- Case 15: fleet NEWER than host -> leave it alone (the regression) ------
+rm -f "${marker}" "${state}" "${tmp}/seeded"
+mk_cred_exp AAA 1000 > "${tmp}/host-credentials.json"
+mk_cred_exp BBB 2000 > "${fleetcred}"
+runsync
+check "fleet newer than host does not re-seed" "$( [ -f "${tmp}/seeded" ] && echo yes || echo no )" "no"
+check "fleet newer than host does not kick"    "$(kicks)" "0"
+
+# --- Case 16: host NEWER than fleet -> the normal direction still works -----
+rm -f "${marker}" "${state}" "${tmp}/seeded"
+mk_cred_exp CCC 3000 > "${tmp}/host-credentials.json"
+runsync
+check "host newer than fleet re-seeds"         "$( [ -f "${tmp}/seeded" ] && echo yes || echo no )" "yes"
+check "host newer than fleet recycles"         "$(kicks)" "1"
+
+# --- Case 17: equal expiry, different token -> host wins, as before ---------
+# Ambiguous by timestamp, so fall back to the pre-existing rule rather than
+# inventing a tiebreak. Case 11 depends on this staying true.
+rm -f "${marker}" "${state}" "${tmp}/seeded"
+mk_cred_exp EEE 5000 > "${tmp}/host-credentials.json"
+mk_cred_exp FFF 5000 > "${fleetcred}"
+runsync
+check "equal expiry re-seeds from host"        "$( [ -f "${tmp}/seeded" ] && echo yes || echo no )" "yes"
+
+# --- Case 18: a husk is never protected by its own expiry ------------------
+# An agent can write {"accessToken":"","expiresAt":<huge>}. If expiry were
+# checked before the token, that would pin the fleet on an empty credential
+# permanently — a prompt-injected agent's cheapest denial of service.
+rm -f "${marker}" "${state}" "${tmp}/seeded"
+mk_cred_exp DDD 1000 > "${tmp}/host-credentials.json"
+mk_cred_exp "" 9999999999999 > "${fleetcred}"
+runsync
+check "husk fleet credential re-seeds despite newer expiry" \
+  "$( [ -f "${tmp}/seeded" ] && echo yes || echo no )" "yes"
+
+# --- Case 19: an unparseable fleet expiry must not protect it --------------
+rm -f "${marker}" "${state}" "${tmp}/seeded"
+mk_cred_exp GGG 1000 > "${tmp}/host-credentials.json"
+printf '{"claudeAiOauth":{"accessToken":"HHH","refreshToken":"r","expiresAt":"not-a-number"}}' > "${fleetcred}"
+runsync
+check "unparseable fleet expiry re-seeds"      "$( [ -f "${tmp}/seeded" ] && echo yes || echo no )" "yes"
+
 # --- session continuity ------------------------------------------------------
 # A recycle must cost seconds, not the conversation. These cover the identity
 # and naming rules; the resume itself is exercised live (see NOTES.md).
