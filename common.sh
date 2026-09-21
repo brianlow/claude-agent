@@ -46,8 +46,9 @@ container_state() {
 }
 
 # Populate ${FLEET_CLAUDE_HOME} from the host's ~/.claude. Copies only what the
-# agents need to start: credentials, settings, the statusline binary, and
-# plugins. Everything the agents *write* — projects/, history.jsonl,
+# agents need to start: settings, the statusline binary, and plugins — the
+# credential is seed_fleet_credentials()'s job, from the keychain rather than
+# from here. Everything the agents *write* — projects/, history.jsonl,
 # file-history/, shell-snapshots/ — stays in the fleet home and never touches
 # the host copy, so host session transcripts aren't exposed either.
 #
@@ -66,8 +67,14 @@ seed_fleet_claude_home() {
   done
 
   # Flat files the host owns.
+  #
+  # .credentials.json is deliberately NOT in this list. The host's copy is a
+  # HUSK on this machine (empty tokens, epoch expiry — that is what Claude Code
+  # writes when a credential is revoked), and copying it clobbers the real token
+  # that seed_fleet_credentials() writes from the keychain. That function owns
+  # this one file; nothing else may touch it.
   local f
-  for f in .credentials.json settings.json statusline-ps1.sh; do
+  for f in settings.json statusline-ps1.sh; do
     [ -f "${HOME}/.claude/${f}" ] || continue
     cp -p "${HOME}/.claude/${f}" "${FLEET_CLAUDE_HOME}/${f}"
   done
@@ -75,6 +82,57 @@ seed_fleet_claude_home() {
   # entrypoint.sh links this to ~/.claude.json inside the container; it also
   # writes to it (trust prompt, MCP registration), which is why it's a copy.
   [ -f "${HOME}/.claude.json" ] && cp -p "${HOME}/.claude.json" "${FLEET_CLAUDE_HOME}/.claude.json"
+  return 0
+}
+
+# Give the fleet a usable file credential, read from the host KEYCHAIN.
+#
+# The host's ~/.claude/.credentials.json is a husk here (empty tokens, epoch
+# expiry); the live OAuth token lives in the keychain item. Copying the file —
+# which is what this fleet used to do — seeds an expired credential with nothing
+# to refresh from, and every agent comes up "Not logged in". It was invisible
+# historically only because KeepAlive restarted agents often enough to re-seed.
+#
+# Containers have no keychain, and Claude Code needs a credential STORE rather
+# than the keychain specifically: it falls back to ~/.claude/.credentials.json
+# when the keychain is unreachable. So read the item here on the host and write
+# it into the fleet home, which is mounted at /home/user/.claude.
+#
+# 0600 inside a 0700 fleet home. This is a plaintext refresh token on disk,
+# which is worse at rest than the keychain and far better in blast radius than
+# granting a container the host keychain.
+#
+# KNOWN: the fleet holds a COPY of the host's OAuth grant, and refreshing
+# rotates the refresh token — whichever side refreshes second is revoked. The
+# fix is the fleet having its own login or an ANTHROPIC_API_KEY, not a better
+# copy. Touch ~/.claude-agent/no-seed to stop seeding once it does.
+seed_fleet_credentials() {
+  local dest="${FLEET_CLAUDE_HOME}/.credentials.json"
+  local no_seed="${HOME}/.claude-agent/no-seed"
+  local token
+
+  if [ -e "${no_seed}" ]; then
+    echo "seed_fleet_credentials: ${no_seed} present — leaving the fleet's own credential alone" >&2
+    return 0
+  fi
+
+  token="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null)" || {
+    echo "WARNING: no 'Claude Code-credentials' in the host keychain — agents will not authenticate" >&2
+    return 0
+  }
+
+  # Reject a husk rather than overwrite a working fleet credential with it.
+  printf '%s' "${token}" | /usr/bin/python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin).get("claudeAiOauth", {})
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if d.get("accessToken") and d.get("refreshToken") else 1)
+' || { echo "WARNING: host keychain credential is empty — leaving the fleet copy alone" >&2; return 0; }
+
+  ( umask 077; printf '%s' "${token}" > "${dest}" )
+  chmod 600 "${dest}"
   return 0
 }
 

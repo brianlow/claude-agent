@@ -20,6 +20,9 @@ container rm -f "${NAME}" &>/dev/null || true
 mkdir -p "${HOME}/.gcalcli"
 cp "${HOME}/Library/Application Support/gcalcli/oauth" "${HOME}/.gcalcli/oauth" 2>/dev/null || true
 seed_fleet_claude_home
+# Must run AFTER seed_fleet_claude_home (which creates the fleet home) — it
+# writes the one file that function deliberately does not copy.
+seed_fleet_credentials
 
 # Foreground (no -d) so launchd tracks the process lifetime. --tty gives the
 # claude TUI a pty; no --interactive because no stdin is attached under launchd.

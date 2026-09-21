@@ -3,26 +3,50 @@ This is a container for running Claude Code with remote session on
 It is using Apple Container tech
 https://github.com/apple/container
 
-> **The running fleet is now `sandbox-exec-prototype/`, not this one.** Those
-> five agents are native macOS processes under Seatbelt rather than containers,
-> because this fleet could not pair with Remote Control. Everything below still
-> describes the container fleet, which is not running — see
-> [`sandbox-exec-prototype/README.md`](sandbox-exec-prototype/README.md) for the
-> live one.
+> **This fleet is the running one again, as of 2026-09-20.** It was mothballed
+> because it could not pair with Remote Control —
+> `Remote Control requires a claude.ai subscription`, which
+> `sandbox-exec-prototype/` was built to route around by running agents as
+> native macOS processes. **That blocker is gone.** On a subscription held
+> directly with Anthropic rather than through the App Store, all five containers
+> pair:
 >
-> Three things learned there apply directly to this fleet if it is ever revived:
+> ```
+> Opus 4.8 (1M context) · Claude Pro
+> /remote-control is active · Continue here, on your phone, or at
+> https://claude.ai/code/session_…
+> ```
 >
-> - **Its `~/.claude` seed copies a husk.** `~/.claude/.credentials.json` on the
->   host has empty tokens — that is what Claude Code writes when a credential is
->   revoked. Tested with `HOME=~/.claude-agent/claude-home`: this fleet reports
->   `Not logged in` today. It used to work because its agents restarted often
->   enough to always re-seed a live token, which made the problem invisible
->   rather than absent.
+> So `NOTES.md`'s conclusion that "the entitlement check is platform-based, not
+> account-based" is wrong, or no longer holds. It was drawn from a single
+> experiment that held `billingType: apple_subscription` constant and varied the
+> platform; varying the billing type instead unblocks the container.
+>
+> The sandbox-exec fleet is **not running**; it stays in the tree as the better
+> operational record. Three things it learned still apply here:
+>
+> - **The `~/.claude` seed used to copy a husk**, and that is why this fleet
+>   reported `Not logged in`. `~/.claude/.credentials.json` on the host has
+>   empty tokens — what Claude Code writes when a credential is revoked — while
+>   the live token is in the keychain item. **Fixed:**
+>   `seed_fleet_credentials()` reads the keychain and writes the file; the husk
+>   is no longer copied over it. It used to work by accident, because agents
+>   restarted often enough to re-seed a live token before anyone noticed.
 > - **The fleet and you share one OAuth grant, and refreshing rotates it**, so
 >   whichever side refreshes second is revoked (~2–3x/day, either direction).
+>   Still true here. `./reset-agents.sh` repairs the fleet side; nothing stops
+>   the fleet from revoking *you*. The real fix is the fleet having its own
+>   login or an `ANTHROPIC_API_KEY` — touch `~/.claude-agent/no-seed` to stop
+>   seeding once it does.
 > - **`KeepAlive` cannot see a dead bridge** — the process does not exit, so
 >   launchd thinks the job is healthy. `sandbox-exec-prototype/sbx-bridge-watcher.sh`
->   is the fix; this fleet has no equivalent.
+>   is the fix; this fleet still has no equivalent, and the `Fleet Reset.md`
+>   note is the manual substitute.
+>
+> Two more ports worth making, both sandbox-exec-only today: **session resume**
+> (a stable per-agent `--session-id`, so a restart costs seconds rather than the
+> conversation) and **stripping `projects` from the seeded `.claude.json`**,
+> which currently carries 16 host project paths into every container.
 >
 > Full write-up: `sandbox-exec-prototype/NOTES.md`, "Fleet HOME, credentials,
 > and the OAuth collision".
