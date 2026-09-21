@@ -106,10 +106,52 @@ seed_fleet_claude_home() {
 # rotates the refresh token — whichever side refreshes second is revoked. The
 # fix is the fleet having its own login or an ANTHROPIC_API_KEY, not a better
 # copy. Touch ~/.claude-agent/no-seed to stop seeding once it does.
+# The fleet's OWN long-lived token, from `claude setup-token`, kept in its own
+# keychain item so it never lands in this repo.
+#
+# WHY A SEPARATE CREDENTIAL AT ALL. A copy of the host's OAuth grant collides,
+# and not only with the host: all five agents share one ${FLEET_CLAUDE_HOME},
+# so they share one .credentials.json. Each refreshes independently and every
+# refresh ROTATES the refresh token, so the first agent to refresh revokes the
+# other four, whose in-memory copies are now stale. Measured 2026-09-20: seeded
+# a live token at 10:26, and by 20:44 the fleet file was a husk (empty tokens,
+# epoch expiry) while the host keychain held a different token entirely.
+#
+# So a second Claude ACCOUNT does not fix this — five agents on one grant
+# collide whoever owns the grant. What fixes it is a credential that never
+# refreshes. `claude setup-token` mints one against the existing subscription,
+# with no metered API billing and nothing to rotate.
+#
+# Install it (interactive, opens a browser — run it yourself, and note the
+# token never needs to be pasted anywhere but this one command):
+#
+#   claude setup-token
+#   security add-generic-password -U -s "${FLEET_TOKEN_SERVICE}" -a "$USER" -w
+#
+# Remove it, to fall back to seeding from the host keychain:
+#
+#   security delete-generic-password -s "${FLEET_TOKEN_SERVICE}"
+FLEET_TOKEN_SERVICE="claude-agent-fleet-token"
+
+fleet_oauth_token() {
+  security find-generic-password -s "${FLEET_TOKEN_SERVICE}" -w 2>/dev/null
+}
+
 seed_fleet_credentials() {
   local dest="${FLEET_CLAUDE_HOME}/.credentials.json"
   local no_seed="${HOME}/.claude-agent/no-seed"
   local token
+
+  # A fleet token supersedes seeding entirely, and implies it rather than
+  # needing the no-seed file alongside — a half-configured fleet (own token,
+  # seeding still on) would put it straight back on the host's grant at the
+  # next launch. Drop the stale file too, so there is exactly one credential
+  # in play and "no credential" fails loudly instead of ambiguously.
+  if [ -n "$(fleet_oauth_token)" ]; then
+    rm -f "${dest}"
+    echo "seed_fleet_credentials: fleet has its own token (${FLEET_TOKEN_SERVICE}) — not seeding from the host" >&2
+    return 0
+  fi
 
   if [ -e "${no_seed}" ]; then
     echo "seed_fleet_credentials: ${no_seed} present — leaving the fleet's own credential alone" >&2

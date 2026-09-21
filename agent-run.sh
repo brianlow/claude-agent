@@ -21,8 +21,22 @@ mkdir -p "${HOME}/.gcalcli"
 cp "${HOME}/Library/Application Support/gcalcli/oauth" "${HOME}/.gcalcli/oauth" 2>/dev/null || true
 seed_fleet_claude_home
 # Must run AFTER seed_fleet_claude_home (which creates the fleet home) — it
-# writes the one file that function deliberately does not copy.
+# writes the one file that function deliberately does not copy. It is a no-op
+# when the fleet has its own token, below.
 seed_fleet_credentials
+
+# The fleet's own long-lived token, if one is installed. Passed by --env rather
+# than written to disk: it is the credential of record, and Claude Code prefers
+# it over ~/.claude/.credentials.json (which seed_fleet_credentials removes in
+# that case, so there is only ever one).
+#
+# Built as an array so that with no token the flag is absent entirely, rather
+# than passed empty — an empty CLAUDE_CODE_OAUTH_TOKEN reads as "configured"
+# and suppresses the file fallback, which would take the fleet from
+# "authenticated by copy" to "not authenticated at all".
+TOKEN_ARGS=()
+_fleet_token="$(fleet_oauth_token)"
+[ -n "${_fleet_token}" ] && TOKEN_ARGS=(--env "CLAUDE_CODE_OAUTH_TOKEN=${_fleet_token}")
 
 # Foreground (no -d) so launchd tracks the process lifetime. --tty gives the
 # claude TUI a pty; no --interactive because no stdin is attached under launchd.
@@ -33,6 +47,7 @@ exec caffeinate -dims container run \
   --rm \
   --env COLORTERM=truecolor \
   --env "AGENT_SESSION_NAME=${NAME}" \
+  ${TOKEN_ARGS[@]+"${TOKEN_ARGS[@]}"} \
   --mount "source=${VAULT},target=/vault" \
   --mount "source=${FLEET_CLAUDE_HOME},target=/home/user/.claude" \
   --mount "source=${HOME}/.gcalcli,target=/home/user/.local/share/gcalcli" \
