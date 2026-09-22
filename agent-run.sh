@@ -21,23 +21,30 @@ mkdir -p "${HOME}/.gcalcli"
 cp "${HOME}/Library/Application Support/gcalcli/oauth" "${HOME}/.gcalcli/oauth" 2>/dev/null || true
 seed_fleet_claude_home
 # Must run AFTER seed_fleet_claude_home (which creates the fleet home) — it
-# writes the one file that function deliberately does not copy. It is a no-op
-# when the fleet has its own token, below.
+# writes the one file that function deliberately does not copy.
 seed_fleet_credentials
 
-# The fleet's own long-lived token, if one is installed. Passed by --env rather
-# than written to disk: it is the credential of record, and Claude Code prefers
-# it over ~/.claude/.credentials.json (which seed_fleet_credentials removes in
-# that case, so there is only ever one).
+# NO CLAUDE_CODE_OAUTH_TOKEN. A `claude setup-token` credential passed that way
+# authenticates as "Claude API", and Remote Control requires a claude.ai
+# SUBSCRIPTION identity — so the bridge never starts and the fleet is invisible
+# in the desktop app's Fleet view. Measured 2026-09-21, same agent, in order:
 #
-# Built as an array so that with no token the flag is absent entirely, rather
-# than passed empty — an empty CLAUDE_CODE_OAUTH_TOKEN reads as "configured"
-# and suppresses the file fallback, which would take the fleet from
-# "authenticated by copy" to "not authenticated at all".
-TOKEN_ARGS=()
-_fleet_token="$(fleet_oauth_token)"
-[ -n "${_fleet_token}" ] && TOKEN_ARGS=(--env "CLAUDE_CODE_OAUTH_TOKEN=${_fleet_token}")
+#   API Usage Billing -> Not logged in                      (the husk)
+#   Claude Pro -> /rc connecting -> remote-control is active (keychain seed)
+#   Claude API -> no /rc line at all                         (setup-token)
+#
+# So the fleet has to hold a copy of the subscription grant, and the OAuth
+# collision that copy causes is a cost of Remote Control, not a bug to fix with
+# a different credential type. See seed_fleet_credentials() in common.sh.
 
+# AGENT_SESSION_NAME pins the remote-control session name to the container name,
+# so the Fleet view says which slot an agent is. entrypoint.sh falls back to
+# --remote-control-session-name-prefix (agent-<random>) without it.
+#
+# Reusing the name across launches was suspected of hiding agents from the Fleet
+# view and is NOT the cause — tested with random names, which changed nothing.
+# The cause was the credential; see the note above.
+#
 # Foreground (no -d) so launchd tracks the process lifetime. --tty gives the
 # claude TUI a pty; no --interactive because no stdin is attached under launchd.
 # caffeinate -dims prevents display/idle/system/disk sleep while running.
@@ -47,7 +54,6 @@ exec caffeinate -dims container run \
   --rm \
   --env COLORTERM=truecolor \
   --env "AGENT_SESSION_NAME=${NAME}" \
-  ${TOKEN_ARGS[@]+"${TOKEN_ARGS[@]}"} \
   --mount "source=${VAULT},target=/vault" \
   --mount "source=${FLEET_CLAUDE_HOME},target=/home/user/.claude" \
   --mount "source=${HOME}/.gcalcli,target=/home/user/.local/share/gcalcli" \

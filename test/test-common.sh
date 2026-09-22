@@ -10,7 +10,11 @@ check() { # check <desc> <actual> <expected>
 
 check "label_for"   "$(label_for 3)"   "com.brianlow.claude-agent.3"
 check "plist_for"   "$(plist_for 3)"   "${REPO_DIR}/launchd/com.brianlow.claude-agent.3.plist"
-check "agents len"  "${#AGENTS[@]}"    "5"
+# Not a fixed count — the fleet size is a knob (2 while the Fleet-view problem
+# is bisected, 5 normally). Assert it is a non-empty list of bare integers,
+# which is what plist_for/label_for and every loop over it require.
+check "agents non-empty" "$([ "${#AGENTS[@]}" -gt 0 ] && echo yes || echo no)" "yes"
+check "agents numeric"   "$(printf '%s\n' "${AGENTS[@]}" | grep -cvE '^[0-9]+$')" "0"
 
 # render_plist must contain the label, the agent arg, and an absolute program path.
 plist="$(render_plist 2)"
