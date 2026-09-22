@@ -136,9 +136,14 @@ seed_fleet_claude_home() {
 #
 # So the fleet must hold a COPY of the subscription grant, and the collision
 # below is the price of Remote Control rather than a bug a better credential
-# type can fix. The remaining levers are all mitigations: fewer agents, a
-# watcher that re-seeds and recycles, or per-agent fleet homes so a rotation
-# revokes one agent instead of all of them.
+# type can fix. The remaining levers are all mitigations: fewer agents (fewer
+# independent refreshers), or a watcher that re-seeds and recycles.
+#
+# Per-agent fleet homes are NOT one of them, tempting as it looks. They would
+# give each agent its own .credentials.json, but the GRANT is still one: a
+# refresh invalidates the old refresh token server-side, so every other agent's
+# copy is dead whether it sits in a shared file or its own. Separate homes fix
+# the session-state collisions below; they do not touch this.
 #
 # WHY A SEPARATE CREDENTIAL WOULD BE NICE. A copy of the host's OAuth grant collides,
 # and not only with the host: all five agents share one ${FLEET_CLAUDE_HOME},
